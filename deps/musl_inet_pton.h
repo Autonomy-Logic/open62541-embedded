@@ -34,6 +34,16 @@
 #include <winsock2.h>     /* AF_INET */
 #elif defined(UA_ARCHITECTURE_LWIP)
 #include <lwip/sockets.h> /* AF_INET */
+#elif defined(UA_ARCHITECTURE_NONE)
+/* Freestanding: there is no system socket header, and the only thing wanted
+ * from one here is these two constants, whose values are fixed across every
+ * platform that defines them. */
+#ifndef AF_INET
+#define AF_INET 2
+#endif
+#ifndef AF_INET6
+#define AF_INET6 10
+#endif
 #else
 #include <sys/socket.h>   /* AF_INET */
 #endif

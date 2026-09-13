@@ -92,6 +92,8 @@ elseif("${UA_ARCHITECTURE}" STREQUAL "freertos-lwip")
 elseif("${UA_ARCHITECTURE}" STREQUAL "posix-lwip")
     set(UA_ARCHITECTURE_LWIP 1)
     set(UA_ARCHITECTURE_POSIX 1)
+elseif("${UA_ARCHITECTURE}" STREQUAL "none")
+    set(UA_ARCHITECTURE_NONE 1)
 endif()
 
 #################

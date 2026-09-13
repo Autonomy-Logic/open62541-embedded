@@ -31,10 +31,19 @@
 #cmakedefine UA_ARCHITECTURE_ZEPHYR
 #cmakedefine UA_ARCHITECTURE_LWIP
 #cmakedefine UA_ARCHITECTURE_FREERTOS
+#cmakedefine UA_ARCHITECTURE_NONE
 
-/* Select default architecture if none is selected */
+/* Select default architecture if none is selected.
+ *
+ * UA_ARCHITECTURE_NONE is excluded deliberately: `none` is a CHOICE — the
+ * application supplies the clock, EventLoop and ConnectionManager — and
+ * without this guard the guess below silently overrode it with POSIX, so a
+ * freestanding build still pulled in <sys/socket.h> and friends and could not
+ * compile. "No architecture selected" and "the `none` architecture selected"
+ * are different states. */
 #if !defined(UA_ARCHITECTURE_WIN32) && !defined(UA_ARCHITECTURE_POSIX) &&      \
-    !defined(UA_ARCHITECTURE_ZEPHYR) && !defined(UA_ARCHITECTURE_LWIP)
+    !defined(UA_ARCHITECTURE_ZEPHYR) && !defined(UA_ARCHITECTURE_LWIP) &&      \
+    !defined(UA_ARCHITECTURE_NONE)
 # ifdef _WIN32
 #  define UA_ARCHITECTURE_WIN32
 # else
