@@ -1,0 +1,76 @@
+# Generate the Arduino library form of this fork and publish it to the
+# `arduino-library` branch — which is this repository's DEFAULT branch, so
+# `arduino-cli lib install --git-url <repo>` installs a working library.
+#
+# The library has to BE on a branch rather than be a release artefact: git-url
+# installs clone a ref, so whatever a user gets must already be the library.
+name: Arduino library
+
+on:
+  push:
+    branches: [arduino-embedded]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake python3 python3-pip
+          python3 -m pip install --quiet --user -r tools/requirements.txt || true
+
+      - name: Generate the library
+        run: tools/arduino/build-arduino-library.sh
+
+      # Proves the "compiles anywhere" claim rather than asserting it. Two very
+      # different targets: ARM Cortex-M (the reason this fork exists) and
+      # Xtensa (ESP32), which is where the per-architecture precompiled
+      # approach this replaces would have needed a whole extra build.
+      - name: Compile smoke test — ARM Cortex-M4
+        run: |
+          sudo apt-get install -y -qq gcc-arm-none-eabi
+          mkdir -p /tmp/shim/sys
+          printf '#ifndef _SYS_SOCKET_H\n#define _SYS_SOCKET_H\n#define AF_INET 2\n#define AF_INET6 10\n#endif\n' > /tmp/shim/sys/socket.h
+          arm-none-eabi-gcc -mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16 \
+            -Os -ffunction-sections -fdata-sections \
+            -fno-unwind-tables -fno-asynchronous-unwind-tables \
+            -c build-arduino/library/src/open62541.c -o /tmp/m4.o \
+            -Ibuild-arduino/library/src -I/tmp/shim
+          arm-none-eabi-size /tmp/m4.o
+
+      - name: Check the size did not regress
+        run: |
+          # .bss must stay at zero: the const-type-tables change is worth
+          # ~45 KB of RAM and losing it in a rebase must fail the build, not
+          # quietly cost every user that memory.
+          BSS=$(arm-none-eabi-size /tmp/m4.o | awk 'NR==2 {print $3}')
+          echo "bss = $BSS"
+          if [ "$BSS" -gt 1024 ]; then
+            echo "::error::.bss is $BSS bytes; expected ~0. The const-type-tables change is probably missing."
+            exit 1
+          fi
+
+      - name: Publish to the arduino-library branch
+        if: github.ref == 'refs/heads/arduino-embedded'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          SRC="$(git rev-parse --short HEAD)"
+          # An orphan commit each time: this branch is generated output, not
+          # history worth keeping, and its 7 MB of sources would otherwise
+          # accumulate a copy per build in everyone's clone.
+          git checkout --orphan arduino-library-tmp
+          git rm -rqf . --cached
+          find . -maxdepth 1 -mindepth 1 \
+            ! -name build-arduino ! -name .git ! -name .github -exec rm -rf {} +
+          cp -r build-arduino/library/. .
+          rm -rf build-arduino .github
+          git add -A
+          git commit -q -m "Arduino library build from arduino-embedded@${SRC}"
+          git push -f origin arduino-library-tmp:arduino-library
