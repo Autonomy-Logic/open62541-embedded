@@ -1136,7 +1136,7 @@ set(plugin_sources ${PROJECT_SOURCE_DIR}/plugins/ua_log_stdout.c
                    ${PROJECT_SOURCE_DIR}/plugins/crypto/ua_securitypolicy_none.c)
 
 # Add clock implementation based on the base architecture
-if(UA_ARCHITECTURE_POSIX OR UA_ARCHITECTURE_WIN32 OR UA_ENABLE_AMALGAMATION)
+if(UA_ARCHITECTURE_POSIX OR UA_ARCHITECTURE_WIN32 OR (UA_ENABLE_AMALGAMATION AND NOT UA_ARCHITECTURE STREQUAL "none"))
     list(APPEND plugin_sources ${PROJECT_SOURCE_DIR}/arch/posix/clock_posix.c)
 endif()
 
@@ -1170,7 +1170,7 @@ elseif(UA_ARCHITECTURE_ZEPHYR)
          ${PROJECT_SOURCE_DIR}/arch/zephyr/eventloop_zephyr.h
          ${PROJECT_SOURCE_DIR}/arch/zephyr/eventloop_zephyr.c
          ${PROJECT_SOURCE_DIR}/arch/zephyr/eventloop_zephyr_tcp.c)
-elseif(UA_ARCHITECTURE_POSIX OR UA_ARCHITECTURE_WIN32 OR UA_ENABLE_AMALGAMATION)
+elseif(UA_ARCHITECTURE_POSIX OR UA_ARCHITECTURE_WIN32 OR (UA_ENABLE_AMALGAMATION AND NOT UA_ARCHITECTURE STREQUAL "none"))
     # POSIX eventloop (default for amalgamation)
     list(APPEND plugin_sources
          ${PROJECT_SOURCE_DIR}/arch/common/timer.h
