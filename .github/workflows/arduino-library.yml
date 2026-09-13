@@ -11,6 +11,13 @@ on:
     branches: [arduino-embedded]
   workflow_dispatch:
 
+# The publish step pushes a generated branch back to this repository, so the
+# job's token needs write access to contents. Workflows get read-only by
+# default, which fails at the very last step with a 403 after doing all the
+# work — everything green and nothing published.
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
