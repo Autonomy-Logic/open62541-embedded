@@ -288,7 +288,7 @@ class CGenerator:
         if (not isEnum and len(datatype.members) == 0) or (isEnum and len(datatype.elements) == 0):
             return "#define %s_members NULL" % (idName)
         isUnion = isinstance(datatype, StructType) and datatype.is_union
-        members = "static UA_DataTypeMember {}_members[{}] = {{".format(idName, len(datatype.elements) if isEnum else len(datatype.members))
+        members = "static const UA_DataTypeMember {}_members[{}] = {{".format(idName, len(datatype.elements) if isEnum else len(datatype.members))
         before = None
         size = len(datatype.elements) if isEnum else len(datatype.members)
         if isEnum:
@@ -597,7 +597,7 @@ _UA_BEGIN_DECLS
         if totalCount > 0:
 
             self.printh(
-                "extern " + self.export_macro + " UA_DataType UA_" + self.parser.outname.upper() + "[UA_" + self.parser.outname.upper() + "_COUNT];")
+                "extern " + self.export_macro + " const UA_DataType UA_" + self.parser.outname.upper() + "[UA_" + self.parser.outname.upper() + "_COUNT];")
 
             for ns in self.filtered_types:
                 for i, t_name in enumerate(self.filtered_types[ns]):
@@ -659,7 +659,7 @@ _UA_END_DECLS
 
         if totalCount > 0:
             self.printc(
-                "UA_DataType UA_{}[UA_{}_COUNT] = {{".format(self.parser.outname.upper(), self.parser.outname.upper()))
+                "const UA_DataType UA_{}[UA_{}_COUNT] = {{".format(self.parser.outname.upper(), self.parser.outname.upper()))
 
             for ns in self.filtered_types:
                 for i, t_name in enumerate(self.filtered_types[ns]):
