@@ -211,6 +211,16 @@ void* arena_realloc(void* p, size_t size)
         arena_free(p);
         return nullptr;
     }
+    if (!in_arena(p))
+    {
+        // Not ours. Either no arena was supplied, or this predates one being
+        // set, so it came from the standard allocator and must go back there.
+        // Reading a BlockHeader from in front of a foreign pointer would be
+        // eight bytes of garbage interpreted as a size -- which either returns
+        // the block unchanged because the garbage looked big enough, or
+        // memcpys a garbage length. Neither fails anywhere near the cause.
+        return realloc(p, size);
+    }
     BlockHeader* b = header_of(p);
     if (b->size >= align_up(size))
         return p;                     // already big enough
