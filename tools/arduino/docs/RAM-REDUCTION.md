@@ -415,6 +415,31 @@ This also resolves the OPC-UA/S7Comm shared slot pool cleanly: the sketch owns
 the accept loop for both, so "one pool, two protocols" stops being something
 two libraries have to cooperate on.
 
+#### Rename `opcua_log.h` -> `baremetal_log.h`
+
+The debug log wears an OPC-UA name but is already a shared transport: eleven
+files include it, among them `Baremetal.ino`, `baremetal_net.cpp` and
+`s7comm_server.cpp`. S7Comm including an OPC-UA header is the same wart that
+`opcua_net.h` -> `baremetal_net.h` already fixed once; this file was missed.
+
+Scope, following the `BM_NET_*` / `bm_net::` convention that rename set:
+
+| from | to | occurrences |
+|------|----|------------:|
+| `opcua_log.h` / `.cpp` | `baremetal_log.h` / `.cpp` | 2 files |
+| `OPCUA_LOG_H` | `BAREMETAL_LOG_H` | 3 |
+| `OPCUA_LOG(...)` | `BM_LOG(...)` | 47 |
+| `OPCUA_DEBUG_LOG` | `BM_DEBUG_LOG` | 6 |
+| `opcua_logf` | `bm_logf` | 6 |
+| `opcua_log_begin` / `_poll` / `_netstats` | `bm_log_*` | — |
+
+11 files touched in total.
+
+**Sequencing across branches.** The file is shared, so the rename is done
+**on the OPC-UA branch first**, and the S7Comm branch is adjusted to match
+**after the OPC-UA branch has landed**. Doing it on both concurrently would
+guarantee a conflict in `s7comm_server.cpp`, which includes the header today.
+
 Acceptance: the library builds and runs from a non-OpenPLC sketch; the runtime
 contains no `UA_*` platform implementation; both repos' CI green.
 
