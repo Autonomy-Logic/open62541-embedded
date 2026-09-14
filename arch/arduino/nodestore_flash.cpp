@@ -42,8 +42,103 @@
 
 
 #include "arduino_internal.h"
+#include "ua_ns0_flash.h"
 
 namespace {
+
+#ifdef UA_ARDUINO_NS0_FLASH
+
+// ---------------------------------------------------------------------------
+// Namespace zero, served from flash
+//
+// The 48 ns0 nodes are const (see ua_ns0_flash.c) and cost no RAM. Two of them
+// are written during run_startup -- ServerArray and NamespaceArray, whose
+// values are device-specific strings -- so those get a writable copy here and
+// everything else is handed out as a pointer into flash.
+// ---------------------------------------------------------------------------
+
+struct Ns0Overlay
+{
+    UA_Node   node;
+    UA_UInt32 id;
+    bool      in_use;
+};
+Ns0Overlay g_ns0_overlay[UA_ARDUINO_NS0_OVERLAY_SLOTS];
+uint32_t   g_ns0_overlay_exhausted = 0;
+
+bool is_ns0(const UA_NodeId* id)
+{
+    return id != nullptr && id->namespaceIndex == 0 &&
+           id->identifierType == UA_NODEIDTYPE_NUMERIC;
+}
+
+/** Binary search: the generated table is sorted by numeric id. */
+const UA_Node* ns0_flash_find(UA_UInt32 numeric)
+{
+    size_t lo = 0, hi = ua_ns0_nodes_count;
+    while (lo < hi)
+    {
+        const size_t mid = lo + (hi - lo) / 2;
+        const UA_UInt32 v = ua_ns0_nodes[mid].head.nodeId.identifier.numeric;
+        if (v == numeric) return &ua_ns0_nodes[mid];
+        if (v < numeric)  lo = mid + 1;
+        else              hi = mid;
+    }
+    return nullptr;
+}
+
+Ns0Overlay* ns0_overlay_find(UA_UInt32 numeric)
+{
+    for (auto& o : g_ns0_overlay)
+        if (o.in_use && o.id == numeric) return &o;
+    return nullptr;
+}
+
+/** The node as it stands: the overlay copy if one exists, else flash. */
+const UA_Node* ns0_current(UA_UInt32 numeric)
+{
+    const Ns0Overlay* o = ns0_overlay_find(numeric);
+    return o ? &o->node : ns0_flash_find(numeric);
+}
+
+/** A writable copy, made on first edit.
+ *
+ *  The copy is SHALLOW on purpose: references, browse name and display name
+ *  keep pointing into flash, because nothing that edits an ns0 node touches
+ *  them -- what startup writes is a value and a value-source callback. A deep
+ *  copy would put the 1.2 KB this design exists to keep out of RAM straight
+ *  back into it. */
+UA_Node* ns0_overlay_get(UA_UInt32 numeric, const UA_Logger* logger)
+{
+    if (Ns0Overlay* o = ns0_overlay_find(numeric))
+        return &o->node;
+    const UA_Node* flash = ns0_flash_find(numeric);
+    if (flash == nullptr)
+        return nullptr;
+    for (auto& o : g_ns0_overlay)
+    {
+        if (o.in_use) continue;
+        o.node   = *flash;      // shallow: flash still owns names and references
+        o.id     = numeric;
+        o.in_use = true;
+        return &o.node;
+    }
+    g_ns0_overlay_exhausted++;
+    if (logger != nullptr)
+    {
+        UA_LOG_ERROR(logger, UA_LOGCATEGORY_SERVER,
+                     "Flash ns0: overlay full (%u slots), node %u stays read-only. "
+                     "Raise UA_ARDUINO_NS0_OVERLAY_SLOTS.",
+                     (unsigned)UA_ARDUINO_NS0_OVERLAY_SLOTS, (unsigned)numeric);
+    }
+    return nullptr;
+}
+
+#else   /* MINIMAL: namespace zero lives in the inner store, as upstream builds it */
+inline bool is_ns0(const UA_NodeId*)                    { return false; }
+inline const UA_Node* ns0_current(UA_UInt32)            { return nullptr; }
+inline UA_Node* ns0_overlay_get(UA_UInt32, const UA_Logger*) { return nullptr; }
+#endif
 
 struct PoolSlot
 {
@@ -57,6 +152,7 @@ struct FlashNodestoreImpl
     UA_Nodestore* inner;    // owns namespace zero and anything not ours
     UA_Arduino_FlashNodeSource source;
     const UA_Logger* logger;
+    bool          ns0_flash;   // serve namespace zero from the const table
     UA_UInt16     ns;
     PoolSlot*     pool;          // follows the struct in one allocation
     uint16_t      poolSlots;
@@ -151,6 +247,8 @@ const UA_Node* ns_getNode(UA_Nodestore* ns, const UA_NodeId* nodeId,
     FlashNodestoreImpl* m = self(ns);
     if (is_ours(m, nodeId))
         return materialise(m, nodeId->identifier.numeric);
+    if (m->ns0_flash && is_ns0(nodeId))
+        return ns0_current(nodeId->identifier.numeric);
     return m->inner->getNode(m->inner, nodeId, attributeMask, references,
                              referenceDirections);
 }
@@ -165,6 +263,11 @@ const UA_Node* ns_getNodeFromPtr(UA_Nodestore* ns, UA_NodePointer ptr,
         const UA_NodeId id = UA_NodePointer_toNodeId(ptr);
         if (is_ours(m, &id))
             return materialise(m, id.identifier.numeric);
+    }
+    {
+        const UA_NodeId id = UA_NodePointer_toNodeId(ptr);
+        if (m->ns0_flash && is_ns0(&id))
+            return ns0_current(id.identifier.numeric);
     }
     return m->inner->getNodeFromPtr(m->inner, ptr, attributeMask, references,
                                     referenceDirections);
@@ -183,7 +286,14 @@ UA_Node* ns_getEditNode(UA_Nodestore* ns, const UA_NodeId* nodeId,
 {
     FlashNodestoreImpl* m = self(ns);
     if (is_ours(m, nodeId))
-        return (UA_Node*)(uintptr_t)materialise(m, nodeId->identifier.numeric);
+    {
+        // Our own nodes are flash too: read-only by construction, and the
+        // writeMask set by the source's materialise() is what tells a client
+        // so rather than letting a write appear to succeed.
+        return nullptr;
+    }
+    if (m->ns0_flash && is_ns0(nodeId))
+        return ns0_overlay_get(nodeId->identifier.numeric, m->logger);
     return m->inner->getEditNode(m->inner, nodeId, attributeMask, references,
                                  referenceDirections);
 }
@@ -219,6 +329,18 @@ void ns_releaseNode(UA_Nodestore* ns, const UA_Node* node)
                 m->live--;
         }
         return;
+    }
+    if (m->ns0_flash && node != nullptr)
+    {
+        // A pointer into the flash table or the overlay belongs to neither the
+        // pool nor the inner store; releasing it anywhere would be wrong.
+        const uintptr_t p = (uintptr_t)node;
+        const uintptr_t f0 = (uintptr_t)&ua_ns0_nodes[0];
+        const uintptr_t f1 = (uintptr_t)&ua_ns0_nodes[ua_ns0_nodes_count];
+        if (p >= f0 && p < f1)
+            return;
+        for (const auto& o : g_ns0_overlay)
+            if (node == &o.node) return;
     }
     m->inner->releaseNode(m->inner, node);
 }
@@ -269,13 +391,32 @@ UA_StatusCode ns_removeNode(UA_Nodestore* ns, const UA_NodeId* nodeId)
 const UA_NodeId* ns_getReferenceTypeId(UA_Nodestore* ns, UA_Byte refTypeIndex)
 {
     FlashNodestoreImpl* m = self(ns);
+    if (m->ns0_flash)
+    {
+        // Browse asks by compact index; with ns0 in flash there is no tree to
+        // consult, so the generated map answers.
+        if ((size_t)refTypeIndex < ua_ns0_reftype_count)
+            return &ua_ns0_reftype_ids[refTypeIndex];
+        return nullptr;
+    }
     return m->inner->getReferenceTypeId(m->inner, refTypeIndex);
 }
 
 void ns_iterate(UA_Nodestore* ns, UA_NodestoreVisitor visitor, void* visitorCtx)
 {
     FlashNodestoreImpl* m = self(ns);
-    m->inner->iterate(m->inner, visitor, visitorCtx);
+    if (m->ns0_flash)
+    {
+        for (size_t i = 0; i < ua_ns0_nodes_count; i++)
+        {
+            const UA_UInt32 id = ua_ns0_nodes[i].head.nodeId.identifier.numeric;
+            visitor(visitorCtx, ns0_current(id));
+        }
+    }
+    else
+    {
+        m->inner->iterate(m->inner, visitor, visitorCtx);
+    }
     // Enumerating our own nodes is optional: a source that cannot list them
     // simply is not walked, which costs a Browse of the whole address space
     // from the server's own housekeeping and nothing a client can see.
@@ -297,7 +438,8 @@ void ns_iterate(UA_Nodestore* ns, UA_NodestoreVisitor visitor, void* visitorCtx)
 UA_Nodestore* UA_Nodestore_newFlash(const UA_Arduino_FlashNodeSource* source,
                                     UA_Nodestore* inner,
                                     const UA_Logger* logger,
-                                    uint16_t poolSlots)
+                                    uint16_t poolSlots,
+                                    bool serveNamespaceZeroFromFlash)
 {
     if (inner == nullptr || source == nullptr || source->materialise == nullptr ||
         source->dematerialise == nullptr)
@@ -317,7 +459,8 @@ UA_Nodestore* UA_Nodestore_newFlash(const UA_Arduino_FlashNodeSource* source,
     m->inner  = inner;
     m->ns     = source->namespaceIndex;
     m->source = *source;
-    m->logger = logger;
+    m->logger    = logger;
+    m->ns0_flash = serveNamespaceZeroFromFlash;
 
     UA_Nodestore* ns          = &m->base;
     ns->free                  = ns_free;

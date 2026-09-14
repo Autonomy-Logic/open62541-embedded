@@ -55,6 +55,10 @@ mkdir -p "$(dirname "$BUILD")"
 #                             and never used.
 #   UA_ENABLE_DATATYPES_ALL / TYPEDESCRIPTION  forced ON: the upstream build
 #                             does not compile with them OFF.
+# UA_NS0=NONE builds the variant whose namespace zero comes from the const
+# table in arch/arduino/ua_ns0_flash.c instead of being constructed in RAM at
+# startup -- 18,992 bytes of heap traded for 13,641 of flash. MINIMAL stays the
+# default until the NONE path has more hardware behind it.
 cmake -S "$ROOT" -B "$BUILD" \
   -DUA_ARCHITECTURE=none \
   -DUA_ENABLE_AMALGAMATION=ON \
@@ -77,7 +81,7 @@ cmake -S "$ROOT" -B "$BUILD" \
   -DUA_ENABLE_DA=OFF \
   -DUA_ENABLE_DATATYPES_ALL=ON \
   -DUA_ENABLE_TYPEDESCRIPTION=ON \
-  -DUA_NAMESPACE_ZERO=MINIMAL \
+  -DUA_NAMESPACE_ZERO="${UA_NS0:-MINIMAL}" \
   -DUA_ENABLE_MALLOC_SINGLETON=ON \
   -DCMAKE_BUILD_TYPE=MinSizeRel \
   > "$BUILD.configure.log" 2>&1 || { tail -30 "$BUILD.configure.log"; exit 1; }
@@ -126,7 +130,8 @@ cp "$ROOT/LICENSE" "$OUT/LICENSE"
 # nothing.
 ARCH="$ROOT/arch/arduino"
 cp "$ARCH/open62541_arduino.h" "$ARCH/UA_ArduinoListener.h" "$OUT/src/"
-cp "$ARCH/arduino_internal.h" "$ARCH"/*.cpp                 "$OUT/src/arduino/"
+cp "$ARCH/arduino_internal.h" "$ARCH/ua_ns0_flash.h" \
+   "$ARCH"/*.cpp "$ARCH"/*.c                                "$OUT/src/arduino/"
 
 # Examples are how anyone finds out the library stands on its own.
 if [ -d "$ROOT/arch/arduino/examples" ]; then

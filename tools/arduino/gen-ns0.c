@@ -193,7 +193,34 @@ int main(int argc, char **argv) {
         }
         fprintf(f, "  } },\n");
     }
-    fprintf(f, "};\n\nconst size_t ua_ns0_nodes_count = %d;\n", n_nodes);
+    fprintf(f, "};\n\nconst size_t ua_ns0_nodes_count = %d;\n\n", n_nodes);
+
+    /* referenceTypeIndex -> NodeId.
+     *
+     * Browse resolves reference types by a compact byte index, and the default
+     * nodestore answers from its own tree. With namespace zero in flash there
+     * is no tree to ask, so the mapping is emitted too. */
+    {
+        UA_NodeId byIndex[256];
+        int maxIdx = -1;
+        memset(byIndex, 0, sizeof(byIndex));
+        for (int i = 0; i < n_nodes; i++) {
+            if (nodes[i]->head.nodeClass != UA_NODECLASS_REFERENCETYPE) continue;
+            UA_Byte ix = nodes[i]->referenceTypeNode.referenceTypeIndex;
+            byIndex[ix] = nodes[i]->head.nodeId;
+            if (ix > maxIdx) maxIdx = ix;
+        }
+        fprintf(f, "const UA_NodeId ua_ns0_reftype_ids[%d] = {\n", maxIdx + 1);
+        for (int i = 0; i <= maxIdx; i++) {
+            fprintf(f, "  ");
+            if (byIndex[i].identifier.numeric == 0 && byIndex[i].namespaceIndex == 0)
+                fprintf(f, "{0, UA_NODEIDTYPE_NUMERIC, {.numeric = 0u}}");
+            else
+                emit_nodeid(f, &byIndex[i]);
+            fprintf(f, ",\n");
+        }
+        fprintf(f, "};\nconst size_t ua_ns0_reftype_count = %d;\n", maxIdx + 1);
+    }
     fclose(f);
     UA_Server_delete(s);
     return 0;

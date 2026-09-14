@@ -271,7 +271,8 @@ typedef struct {
 UA_Nodestore* UA_Nodestore_newFlash(const UA_Arduino_FlashNodeSource* source,
                                     UA_Nodestore* inner,
                                     const UA_Logger* logger,
-                                    uint16_t poolSlots);
+                                    uint16_t poolSlots,
+                                    bool serveNamespaceZeroFromFlash);
 
 /** Peak simultaneous materialised nodes, and how many times the pool was
  *  exhausted. `exhausted` must be zero in a healthy build. */

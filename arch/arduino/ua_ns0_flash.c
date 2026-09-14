@@ -6,6 +6,12 @@
 
 #include "ua_ns0_flash.h"
 
+/* A MINIMAL build constructs namespace zero in RAM at startup and never reads
+ * this table, but the nodestore references it from a branch the linker cannot
+ * prove is dead -- so without this guard every MINIMAL build would carry 13.6
+ * KB of flash it can never use. */
+#ifdef UA_ARDUINO_NS0_FLASH
+
 static const UA_ReferenceTarget n0_k0[] = {
   {UA_NS0_NP(0, 90u), 3450041679u},
 };
@@ -1509,3 +1515,27 @@ const UA_Node ua_ns0_nodes[48] = {
 };
 
 const size_t ua_ns0_nodes_count = 48;
+
+const UA_NodeId ua_ns0_reftype_ids[18] = {
+  {0, UA_NODEIDTYPE_NUMERIC, {.numeric = 31u}},
+  {0, UA_NODEIDTYPE_NUMERIC, {.numeric = 45u}},
+  {0, UA_NODEIDTYPE_NUMERIC, {.numeric = 44u}},
+  {0, UA_NODEIDTYPE_NUMERIC, {.numeric = 33u}},
+  {0, UA_NODEIDTYPE_NUMERIC, {.numeric = 32u}},
+  {0, UA_NODEIDTYPE_NUMERIC, {.numeric = 34u}},
+  {0, UA_NODEIDTYPE_NUMERIC, {.numeric = 35u}},
+  {0, UA_NODEIDTYPE_NUMERIC, {.numeric = 36u}},
+  {0, UA_NODEIDTYPE_NUMERIC, {.numeric = 37u}},
+  {0, UA_NODEIDTYPE_NUMERIC, {.numeric = 38u}},
+  {0, UA_NODEIDTYPE_NUMERIC, {.numeric = 39u}},
+  {0, UA_NODEIDTYPE_NUMERIC, {.numeric = 40u}},
+  {0, UA_NODEIDTYPE_NUMERIC, {.numeric = 41u}},
+  {0, UA_NODEIDTYPE_NUMERIC, {.numeric = 46u}},
+  {0, UA_NODEIDTYPE_NUMERIC, {.numeric = 47u}},
+  {0, UA_NODEIDTYPE_NUMERIC, {.numeric = 48u}},
+  {0, UA_NODEIDTYPE_NUMERIC, {.numeric = 49u}},
+  {0, UA_NODEIDTYPE_NUMERIC, {.numeric = 17603u}},
+};
+const size_t ua_ns0_reftype_count = 18;
+
+#endif /* UA_ARDUINO_NS0_FLASH */
