@@ -92,9 +92,66 @@ live at a time, regardless of how many clients are connected.**
 
 No leak: 12,442 reads returned `in_use` to exactly 33,408.
 
+## Where the library ends and we begin
+
+Worth settling before reading the findings, because "ours" and "the library's"
+is the wrong axis to bucket these numbers on.
+
+Upstream draws the line in `arch/README.md`:
+
+- **`/src`** — the OS-independent core: protocol, services, encoding, address
+  space.
+- **`/arch`** — clock and EventLoop (networking, timers, interrupts). One per
+  OS; upstream ships `posix`, `lwip`, `zephyr`, `freertos`.
+- **`/plugins`** — nodestore, access control, logging, security policies,
+  default config.
+- **application** — everything above that.
+
+`UA_ARCHITECTURE=none` means *ship no `/arch`; the integrator links their own*.
+So `opcua_arch_tcp.cpp` is not application code — it fills the `/arch` slot,
+and `opcua_nodestore.cpp` fills a `/plugins` slot (upstream's occupant there is
+`ua_nodestore_ziptree.c`). Both are **library-layer code that we happen to have
+authored**, because no upstream port fits this target.
+
+That last part is not for want of trying by upstream. `arch/lwip` exists, and
+the LOGO runs lwIP — but that port is built on `lwip/sockets.h` and
+`lwip/tcpip.h` (`lwip_socket`, `lwip_accept`, `lwip_select`), which need
+`LWIP_SOCKET=1` and `NO_SYS=0`: a real RTOS with a tcpip thread. The LOGO core
+is `NO_SYS=1`, `LWIP_SOCKET=0`, `LWIP_NETCONN=0` — raw callback API, bare
+superloop. Writing our own connection manager was forced, not a shortcut.
+
+Bucketing the 44,816-byte peak by layer rather than by authorship:
+
+| layer | bytes | share | authored by |
+|-------|------:|------:|-------------|
+| core `/src` — ns0 nodes, references, locales, ziptree index | 18,992 | 42% | upstream |
+| core `/src` — config, session/channel, browse scratch | 6,216 | 14% | upstream |
+| `/arch` — TCP connection manager, EventLoop, send buffer | 17,928 | 40% | us |
+| `/plugins` — nodestore pool | 1,680 | 4% | us |
+| application (OpenPLC runtime) | ~0 | ~0% | us |
+
+**Essentially none of it is the user application.** `opcua_server.cpp` (init
+plus `run_iterate` inside the scan cycle) and `opcua_nodes.cpp` (the node table
+reading located PLC buffers) are the application layer, and they allocate
+almost nothing: project nodes already come from a `const` flash table, and the
+only application allocation is a small per-read value copy in `opcua_nodes.cpp`
+that is freed immediately and never surfaced in the profile.
+
+Nor is the 44% in our slots an implementation defect. Upstream's own
+posix/lwip/zephyr connection managers malloc their state too — that is the
+house style, and it is unremarkable on a host with virtual memory. It only
+becomes a problem on a 248 KB part where an 8 KB receive buffer is 3% of all
+SRAM.
+
+What the split actually determines is **who we have to negotiate with**: the
+56% in upstream's core needs upstream's cooperation, which we have via the
+`UA_NAMESPACE_ZERO=NONE` seam; the 44% in our `/arch` and `/plugins` slots
+needs nobody's. That is why the ordering in the plan below puts the part with
+an external dependency first and the part we fully control on its own track.
+
 ## Findings
 
-### 1. 30% of the static baseline is our own code, and it is trivially static
+### 1. 30% of the static baseline is `/arch` and `/plugins` state, and it is trivially static
 
 `UA_ConnectionManager_new_Arduino_TCP` allocates one `ArduinoTcpCM` struct
 containing a `kRecvBufSize = 8192` receive buffer — 8,416 bytes, allocated
@@ -102,13 +159,14 @@ once, never freed, compile-time sized. `opcua_nodestore_new` allocates one
 `FlashNodestore` containing an `OPCUA_NODE_POOL_SLOTS`-slot pool — 1,680
 bytes, same story.
 
-Both are singletons in files we own (`opcua_arch_tcp.cpp`,
-`opcua_nodestore.cpp`, in the editor's baremetal sources). Making them
+Both are singletons in the `/arch` and `/plugins` slots we fill
+(`opcua_arch_tcp.cpp`, `opcua_nodestore.cpp`, in the editor's baremetal
+sources). Making them
 file-scope `static` objects instead of `UA_calloc` removes 10,096 bytes from
 the arena requirement with **no open62541 change at all** and no behavioural
 difference. This is the cheapest win available and it should land first.
 
-### 2. The largest transient is also ours, and is bounded by a number we set
+### 2. The largest transient is also `/arch`, and is bounded by a number we set
 
 The 8,240-byte peak allocation is `cm_alloc()` in `opcua_arch_tcp.cpp` calling
 `UA_ByteString_allocBuffer(buf, bufSize)`, where `bufSize` is
@@ -119,7 +177,8 @@ fallback, replaces it. (Peak shows `n=2`: one 8,192 buffer plus one ~32-byte
 one, so the static path needs two slots, not one.)
 
 Taken together, findings 1 and 2 account for **18,336 bytes — 41% of the
-44,816-byte peak — in code we own, with no library fork.** They are worth
+44,816-byte peak — in library-layer slots we fill ourselves, needing no
+upstream change and no fork.** They are worth
 having, but they answer none of this card's open questions, so they are
 sequenced alongside the nodestore work rather than ahead of it.
 
@@ -245,10 +304,12 @@ detail yet. Derive the arena size from declared project settings, have the VPP
 declare a *maximum* rather than a fixed size, and keep the exhaustion counter
 so overruns stay observable rather than silent.
 
-### Orthogonal — platform-layer statics
+### Orthogonal — `/arch` statics
 
-Independent of both phases above: touches no library code, informs no nodestore
-decision, and can land on its own schedule.
+Independent of both phases above: needs no upstream change, informs no
+nodestore decision, and can land on its own schedule. It is library-layer work
+in the sense that matters (it fills upstream's `/arch` slot), but it is work we
+can do unilaterally.
 
 Make `ArduinoTcpCM` (8,416) and the `UA_EventLoop_new_Arduino` allocation
 (1,272) file-scope statics, and give `cm_alloc` a two-slot static send buffer
@@ -256,12 +317,13 @@ Make `ArduinoTcpCM` (8,416) and the `UA_EventLoop_new_Arduino` allocation
 
 - Expected: −9,688 static, −8,240 peak.
 - Risk: very low. No open62541 change, no protocol change.
-- These files currently live in the editor's `resources/sources/Baremetal/`
-  because `UA_ARCHITECTURE=none` makes the platform layer the application's
-  job. Whether that is where they *belong* is a real question, but the answer
-  is not this repo: the fork's delta over upstream is deliberately just
-  `tools/arduino/`, and putting a board-coupled connection manager in it would
-  tax every future rebase.
+- These files currently live in the editor's `resources/sources/Baremetal/`,
+  which is a poor home for something that is architecturally a `/arch` port —
+  it is not editor UI, and it is not OpenPLC application logic. Where it
+  belongs is an open question, but the answer is not this repo either: the
+  fork's delta over upstream is deliberately just `tools/arduino/`, and a
+  board-coupled connection manager in it would tax every future rebase. The
+  candidate homes are the Arduino core and a shared baremetal runtime.
 
 ### Remaining one-shot config structures
 
