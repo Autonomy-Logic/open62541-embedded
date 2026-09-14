@@ -31,7 +31,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUT="${1:-$ROOT/build-arduino/library}"
-BUILD="$ROOT/build-arduino/cmake"
+# The build directory is per-variant. Sharing one meant a second run reused the
+# first's CMake cache and silently produced the wrong namespace-zero
+# configuration -- a NONE build that was actually MINIMAL, which compiles and
+# links and only misbehaves on the device.
+BUILD="${BUILD:-$ROOT/build-arduino/cmake-${UA_NS0:-MINIMAL}}"
 
 VERSION="$(sed -n 's/^set(OPEN62541_VER_MAJOR \([0-9]*\).*/\1/p' "$ROOT/CMakeLists.txt" | head -1)"
 MINOR="$(sed -n 's/^set(OPEN62541_VER_MINOR \([0-9]*\).*/\1/p' "$ROOT/CMakeLists.txt" | head -1)"
