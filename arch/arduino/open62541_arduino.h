@@ -274,9 +274,25 @@ UA_Nodestore* UA_Nodestore_newFlash(const UA_Arduino_FlashNodeSource* source,
                                     uint16_t poolSlots,
                                     bool serveNamespaceZeroFromFlash);
 
+/** Tell the flash nodestore which namespace its nodes live in.
+ *
+ *  Needed because serving namespace zero from flash forces the nodestore to
+ *  exist BEFORE the server -- UA_Server_newWithConfig() is what runs
+ *  namespace-zero initialisation -- while the index for your own namespace is
+ *  only known after UA_Server_addNamespace() returns it. Call this once with
+ *  that index. Until you do, the store answers for namespace zero only. */
+void UA_Nodestore_flashSetNamespace(UA_Nodestore* ns, UA_UInt16 namespaceIndex);
+
 /** Peak simultaneous materialised nodes, and how many times the pool was
  *  exhausted. `exhausted` must be zero in a healthy build. */
 void UA_Arduino_getNodestoreStats(uint16_t* outHighWater, uint32_t* outExhausted);
+
+/** Namespace-zero overlay usage: slots taken, and refusals for want of one.
+ *
+ *  Worth reading during bring-up. The overlay's own error goes through
+ *  UA_Logger, which on a board with no console writes nowhere -- so a counter
+ *  is what actually tells you. `refused` must be zero. */
+void UA_Arduino_getNs0OverlayStats(uint16_t* outUsed, uint32_t* outRefused);
 
 /* -------------------------------------------------------------------------
  * Bounded allocator

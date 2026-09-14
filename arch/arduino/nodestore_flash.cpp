@@ -101,13 +101,53 @@ const UA_Node* ns0_current(UA_UInt32 numeric)
     return o ? &o->node : ns0_flash_find(numeric);
 }
 
+/** Copy a node's reference array into the arena so it can GROW.
+ *
+ *  The Objects folder is the case that forces this: the application adds a
+ *  forward reference to it for each of its own nodes, and open62541 grows the
+ *  array with UA_realloc. Reallocating a pointer into flash is undefined
+ *  behaviour, so an edited node's references have to become heap memory even
+ *  though its names and values do not.
+ *
+ *  Only the array of kinds and each kind's target array are copied; the target
+ *  ids inside them are immediate-encoded values, not pointers, so they carry
+ *  over as-is. */
+bool ns0_clone_references(UA_NodeHead* h)
+{
+    if (h->referencesSize == 0)
+        return true;
+    UA_NodeReferenceKind* kinds = (UA_NodeReferenceKind*)
+        UA_calloc(h->referencesSize, sizeof(UA_NodeReferenceKind));
+    if (kinds == nullptr)
+        return false;
+    for (size_t i = 0; i < h->referencesSize; i++)
+    {
+        kinds[i] = h->references[i];
+        const size_t n = kinds[i].targetsSize;
+        if (n == 0 || kinds[i].hasRefTree)
+            continue;
+        UA_ReferenceTarget* t = (UA_ReferenceTarget*)
+            UA_calloc(n, sizeof(UA_ReferenceTarget));
+        if (t == nullptr)
+        {
+            for (size_t k = 0; k < i; k++)
+                if (!kinds[k].hasRefTree) UA_free(kinds[k].targets.array);
+            UA_free(kinds);
+            return false;
+        }
+        memcpy(t, h->references[i].targets.array, n * sizeof(UA_ReferenceTarget));
+        kinds[i].targets.array = t;
+    }
+    h->references = kinds;
+    return true;
+}
+
 /** A writable copy, made on first edit.
  *
- *  The copy is SHALLOW on purpose: references, browse name and display name
- *  keep pointing into flash, because nothing that edits an ns0 node touches
- *  them -- what startup writes is a value and a value-source callback. A deep
- *  copy would put the 1.2 KB this design exists to keep out of RAM straight
- *  back into it. */
+ *  Names and display text keep pointing into flash -- nothing rewrites them,
+ *  and copying them would put back the bytes this design exists to save. The
+ *  reference array is the exception, because it is the one thing that grows;
+ *  see ns0_clone_references(). */
 UA_Node* ns0_overlay_get(UA_UInt32 numeric, const UA_Logger* logger)
 {
     if (Ns0Overlay* o = ns0_overlay_find(numeric))
@@ -118,7 +158,15 @@ UA_Node* ns0_overlay_get(UA_UInt32 numeric, const UA_Logger* logger)
     for (auto& o : g_ns0_overlay)
     {
         if (o.in_use) continue;
-        o.node   = *flash;      // shallow: flash still owns names and references
+        o.node = *flash;        // names and values still point at flash
+        if (!ns0_clone_references(&o.node.head))
+        {
+            if (logger != nullptr)
+                UA_LOG_ERROR(logger, UA_LOGCATEGORY_SERVER,
+                             "Flash ns0: out of memory cloning references for node %u",
+                             (unsigned)numeric);
+            return nullptr;
+        }
         o.id     = numeric;
         o.in_use = true;
         return &o.node;
@@ -170,7 +218,9 @@ FlashNodestoreImpl* self(UA_Nodestore* ns) { return reinterpret_cast<FlashNodest
  *  than leaking into the inner store where it would also not be found. */
 bool is_ours(FlashNodestoreImpl* m, const UA_NodeId* id)
 {
-    return id != nullptr && id->namespaceIndex == m->ns &&
+    // m->ns == 0 means "namespace not assigned yet": namespace zero is never
+    // ours, so an unassigned store must not claim it.
+    return id != nullptr && m->ns != 0 && id->namespaceIndex == m->ns &&
            id->identifierType == UA_NODEIDTYPE_NUMERIC;
 }
 
@@ -287,10 +337,17 @@ UA_Node* ns_getEditNode(UA_Nodestore* ns, const UA_NodeId* nodeId,
     FlashNodestoreImpl* m = self(ns);
     if (is_ours(m, nodeId))
     {
-        // Our own nodes are flash too: read-only by construction, and the
-        // writeMask set by the source's materialise() is what tells a client
-        // so rather than letting a write appear to succeed.
-        return nullptr;
+        // Hand back a MATERIALISED copy, not nullptr.
+        //
+        // Flash is the truth and any edit is discarded when the node is
+        // released -- but refusing outright breaks callers that legitimately
+        // need a writable node in hand. UA_Server_addReference is the case
+        // that matters: it edits the source to add the forward reference and
+        // the TARGET to add the inverse, and a target it cannot edit fails the
+        // whole call with BadTargetNodeIdInvalid. The inverse it wants is
+        // already in the flash node, so letting the write land on a throwaway
+        // copy costs nothing and keeps the reference wiring working.
+        return const_cast<UA_Node*>(materialise(m, nodeId->identifier.numeric));
     }
     if (m->ns0_flash && is_ns0(nodeId))
         return ns0_overlay_get(nodeId->identifier.numeric, m->logger);
@@ -330,6 +387,7 @@ void ns_releaseNode(UA_Nodestore* ns, const UA_Node* node)
         }
         return;
     }
+#ifdef UA_ARDUINO_NS0_FLASH
     if (m->ns0_flash && node != nullptr)
     {
         // A pointer into the flash table or the overlay belongs to neither the
@@ -342,6 +400,7 @@ void ns_releaseNode(UA_Nodestore* ns, const UA_Node* node)
         for (const auto& o : g_ns0_overlay)
             if (node == &o.node) return;
     }
+#endif
     m->inner->releaseNode(m->inner, node);
 }
 
@@ -391,6 +450,7 @@ UA_StatusCode ns_removeNode(UA_Nodestore* ns, const UA_NodeId* nodeId)
 const UA_NodeId* ns_getReferenceTypeId(UA_Nodestore* ns, UA_Byte refTypeIndex)
 {
     FlashNodestoreImpl* m = self(ns);
+#ifdef UA_ARDUINO_NS0_FLASH
     if (m->ns0_flash)
     {
         // Browse asks by compact index; with ns0 in flash there is no tree to
@@ -399,12 +459,14 @@ const UA_NodeId* ns_getReferenceTypeId(UA_Nodestore* ns, UA_Byte refTypeIndex)
             return &ua_ns0_reftype_ids[refTypeIndex];
         return nullptr;
     }
+#endif
     return m->inner->getReferenceTypeId(m->inner, refTypeIndex);
 }
 
 void ns_iterate(UA_Nodestore* ns, UA_NodestoreVisitor visitor, void* visitorCtx)
 {
     FlashNodestoreImpl* m = self(ns);
+#ifdef UA_ARDUINO_NS0_FLASH
     if (m->ns0_flash)
     {
         for (size_t i = 0; i < ua_ns0_nodes_count; i++)
@@ -414,6 +476,7 @@ void ns_iterate(UA_Nodestore* ns, UA_NodestoreVisitor visitor, void* visitorCtx)
         }
     }
     else
+#endif
     {
         m->inner->iterate(m->inner, visitor, visitorCtx);
     }
@@ -480,6 +543,28 @@ UA_Nodestore* UA_Nodestore_newFlash(const UA_Arduino_FlashNodeSource* source,
 
     g_self = m;
     return ns;
+}
+
+extern "C" void UA_Arduino_getNs0OverlayStats(uint16_t* outUsed, uint32_t* outRefused)
+{
+#ifdef UA_ARDUINO_NS0_FLASH
+    uint16_t used = 0;
+    for (const auto& o : g_ns0_overlay) if (o.in_use) used++;
+    if (outUsed)    *outUsed = used;
+    if (outRefused) *outRefused = g_ns0_overlay_exhausted;
+#else
+    if (outUsed)    *outUsed = 0;
+    if (outRefused) *outRefused = 0;
+#endif
+}
+
+extern "C" void UA_Nodestore_flashSetNamespace(UA_Nodestore* ns, UA_UInt16 namespaceIndex)
+{
+    if (ns == nullptr)
+        return;
+    FlashNodestoreImpl* m = self(ns);
+    m->ns               = namespaceIndex;
+    m->source.namespaceIndex = namespaceIndex;
 }
 
 extern "C" void UA_Arduino_getNodestoreStats(uint16_t* outHighWater, uint32_t* outExhausted)

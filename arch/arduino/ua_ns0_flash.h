@@ -47,15 +47,24 @@ extern const size_t  ua_ns0_nodes_count;
 extern const UA_NodeId ua_ns0_reftype_ids[];
 extern const size_t    ua_ns0_reftype_count;
 
-/** Writable copies for the namespace-zero nodes the server edits at startup.
+/** Writable copies for the namespace-zero nodes the server edits.
  *
- *  Measured, not guessed: exactly two, ServerArray (2254) and NamespaceArray
- *  (2257), are written during run_startup -- their values are device-specific
- *  strings, so they were always going to need RAM. Everything else is served
- *  straight out of flash. The slot count is a ceiling with headroom, and
- *  exhaustion is reported rather than silently dropping a write. */
+ *  Measured on hardware: 13 are taken during startup, so 16 leaves headroom
+ *  without paying for slots nobody uses.
+ *
+ *  An earlier figure of 2 was wrong, and wrong in an instructive way: it came
+ *  from counting getEditNode calls on a MINIMAL server, which runs initNS0().
+ *  The NONE configuration runs initNS0_dataSources() instead, and that binds
+ *  value-source callbacks across the ServerStatus subtree -- a different code
+ *  path with an order of magnitude more writes. Measuring the wrong
+ *  configuration is worse than not measuring, because it produces a number
+ *  that looks earned.
+ *
+ *  Exhaustion is counted and readable through UA_Arduino_getNs0OverlayStats();
+ *  the overlay's own complaint goes to UA_Logger, which on a board with no
+ *  console goes nowhere. */
 #ifndef UA_ARDUINO_NS0_OVERLAY_SLOTS
-#define UA_ARDUINO_NS0_OVERLAY_SLOTS 4
+#define UA_ARDUINO_NS0_OVERLAY_SLOTS 16
 #endif
 
 #endif /* UA_NS0_FLASH_H */
