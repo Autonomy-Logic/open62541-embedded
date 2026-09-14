@@ -119,7 +119,9 @@ fallback, replaces it. (Peak shows `n=2`: one 8,192 buffer plus one ~32-byte
 one, so the static path needs two slots, not one.)
 
 Taken together, findings 1 and 2 account for **18,336 bytes — 41% of the
-44,816-byte peak — in code we own, with no library fork.**
+44,816-byte peak — in code we own, with no library fork.** They are worth
+having, but they answer none of this card's open questions, so they are
+sequenced alongside the nodestore work rather than ahead of it.
 
 ### 3. `UA_NAMESPACE_ZERO=NONE` is already a first-class upstream configuration
 
@@ -177,7 +179,7 @@ produces, and regenerating after an upstream bump is one command.
 The arena holds 33,408 bytes at rest and peaks at 44,816. The 64 KB figure is
 the peak rounded up with headroom. But the peak is the static baseline plus one
 request's scratch, and that scratch is dominated by a buffer whose size we
-choose. Once findings 1–3 land, the arena is no longer sized by "how much does
+choose. Once the flash nodestore and the platform-layer statics land, the arena is no longer sized by "how much does
 open62541 need" but by a formula over the project's own settings.
 
 ## Answers to the Phase 0 questions
@@ -191,12 +193,13 @@ open62541 need" but by a formula over the project's own settings.
    `UA_NAMESPACE_ZERO=NONE`, verified to build. Implementation is a nodestore
    plugin plus a generator, both additive.
 4. **Can the arena be dropped entirely?** Not entirely, but it can shrink a lot.
-   After findings 1–3 the remaining arena users are per-session structures
+   After the flash nodestore and the platform-layer statics, the remaining arena users are per-session structures
    (~1 KB each) and small request scratch. A ~8 KB arena looks reachable.
 5. **Can the arena be computed rather than fixed?** Yes. Once the large fixed
    consumers are static, what remains scales with declared settings:
    `arena = base + sessions x 1,032 + request_scratch`, where the VPP declares
-   a maximum. This becomes tractable only *after* 1–3, which is why it is last.
+   a maximum. This becomes tractable only once the large fixed consumers are
+   gone, which is why it is last.
 6. **Should we pivot to another OPC-UA stack or an existing fork?** **No.** The
    fork we would be looking for is upstream v1.5.8 itself: the ROM-nodestore
    seam is already there. Pivoting would discard a working, hardware-validated,
@@ -204,65 +207,83 @@ open62541 need" but by a formula over the project's own settings.
 
 ## Implementation plan
 
-Ordered by value per unit of risk. Each phase is independently shippable and
-independently measurable on hardware.
+The library question comes first. The flash-resident nodestore is the only part
+of this card with genuine unknowns, it is the largest single line item, and it
+is what determines what the arena can eventually become — so it leads, and
+everything else is sized around what it turns out to allow.
 
-### Phase 1 — static singletons (editor repo, no library change)
+An earlier draft of this plan opened with the cheap platform-layer statics
+instead. That was ordering by cost rather than by uncertainty: those statics
+de-risk nothing for the nodestore, and one of them (the `FlashNodestore` pool)
+lives in the very file the nodestore work rewrites, so doing it first would
+have been work done twice.
 
-Make `ArduinoTcpCM` and `FlashNodestore` file-scope statics; give `cm_alloc` a
-two-slot static send buffer (8,192 + 256) with an arena fallback.
-
-- Expected: −10,096 static, −8,240 peak.
-- Risk: very low. No open62541 change, no protocol change.
-- Verify: arena `in_use` after `run_startup` and at peak; full OPC-UA
-  regression on the LOGO.
-
-### Phase 2 — flash-resident namespace zero (this repo)
+### Phase 1 — flash-resident namespace zero (this repo)
 
 1. Add `UA_NAMESPACE_ZERO=NONE` as a generator option in
    `tools/arduino/generate-arduino-library.sh`, producing a second library
-   variant. Keep MINIMAL as the default until Phase 2 is proven.
+   variant. Keep MINIMAL as the default until this phase is proven.
 2. Write a host-side generator that builds a MINIMAL server, walks the
    nodestore after `run_startup`, and emits a `const` ns0 table (nodes,
-   references, locales, browse names) plus an index.
-3. Extend the flash nodestore to serve ns0 from that table and drop the inner
-   RAM store.
+   references, locales, browse names) plus an index. The host build being the
+   source of truth is what keeps the table honest across upstream bumps.
+3. Rewrite the flash nodestore to serve ns0 from that table and drop the inner
+   RAM store. It is allocated statically from the start — the 1,680-byte pool
+   is part of this phase, not a separate one.
 4. Confirm `initNS0_dataSources()` binds every dynamic callback it expects.
 
-- Expected: −18,992 static.
-- Risk: medium. This is where the real work is. The generator design (host
-  build is the source of truth) is what keeps it from being fragile.
+- Expected: −18,992 static (ns0) −1,680 (pool) = **−20,672**.
+- Risk: medium, and concentrated here. Everything unknown about this card is
+  in step 2 and step 3.
 - Verify: browse the full address space from a reference client and diff
-  against the MINIMAL build's address space — they must be identical.
+  against the MINIMAL build's — they must be identical.
 
-### Phase 3 — one-shot config structures
+### Phase 2 — replace the fixed arena with a computed one
 
-The remaining 4,320 bytes are `UA_EventLoop_new_Arduino` (1,272, ours),
+What Phase 1 leaves behind decides this, which is why it cannot be planned in
+detail yet. Derive the arena size from declared project settings, have the VPP
+declare a *maximum* rather than a fixed size, and keep the exhaustion counter
+so overruns stay observable rather than silent.
+
+### Orthogonal — platform-layer statics
+
+Independent of both phases above: touches no library code, informs no nodestore
+decision, and can land on its own schedule.
+
+Make `ArduinoTcpCM` (8,416) and the `UA_EventLoop_new_Arduino` allocation
+(1,272) file-scope statics, and give `cm_alloc` a two-slot static send buffer
+(8,192 + 256, matching the measured `n=2`) with an arena fallback (8,240 peak).
+
+- Expected: −9,688 static, −8,240 peak.
+- Risk: very low. No open62541 change, no protocol change.
+- These files currently live in the editor's `resources/sources/Baremetal/`
+  because `UA_ARCHITECTURE=none` makes the platform layer the application's
+  job. Whether that is where they *belong* is a real question, but the answer
+  is not this repo: the fork's delta over upstream is deliberately just
+  `tools/arduino/`, and putting a board-coupled connection manager in it would
+  tax every future rebase.
+
+### Remaining one-shot config structures
+
 `UA_Server_newWithConfig` (1,064), `UA_ServerConfig_addSecurityPolicyNone`
-(624) and a tail of small strings. The EventLoop is ours and can be static on
-the same argument as Phase 1. The rest would need upstream changes for
-diminishing returns — evaluate, do not assume.
-
-- Expected: −1,272 confidently, up to −4,320 optimistically.
-
-### Phase 4 — replace the fixed arena with a computed one
-
-Only after 1–3. Derive the arena size from declared project settings, have the
-VPP declare a *maximum* rather than a fixed size, and keep the exhaustion
-counter so overruns stay observable rather than silent.
+(624) and a tail of small strings — ~3,048 bytes. These would need upstream
+changes for diminishing returns. Evaluate after Phase 1, do not assume.
 
 ### Projected outcome
 
 | | static | peak |
 |---|---:|---:|
 | today | 33,408 | 44,816 |
-| after Phase 1 | 23,312 | 26,480 |
-| after Phase 2 | 4,320 | 7,488 |
-| after Phase 3 | ~3,048 | ~6,216 |
+| after Phase 1 (flash ns0) | 12,736 | 23,112 |
+| + platform-layer statics | 3,048 | 6,216 |
+| + config structures (optimistic) | ~1,360 | ~4,528 |
 
 An arena of **8 KB instead of 64 KB**, returning ~56 KB of a 248 KB part —
 before counting what a smaller `sendBufferSize` would buy on projects that do
 not need the full 8,192-byte chunk.
+
+Phase 1 alone takes the peak below 24 KB, which is already enough to justify
+cutting the arena to 32 KB before anything else lands.
 
 ## Notes for whoever picks this up
 
@@ -276,5 +297,5 @@ not need the full 8,192-byte chunk.
   since the last dump. Reflash between scenarios or the numbers blend.
 - `--gc-sections` will silently discard a static buffer nothing demonstrably
   reads. The existing arena carries `__attribute__((used))` for exactly this
-  reason; every static buffer added in Phase 1 needs the same treatment, and
+  reason; every static buffer added by this card needs the same treatment, and
   the check is the map file, not the compiler.
