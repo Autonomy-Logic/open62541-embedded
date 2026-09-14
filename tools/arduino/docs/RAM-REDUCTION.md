@@ -415,33 +415,51 @@ This also resolves the OPC-UA/S7Comm shared slot pool cleanly: the sketch owns
 the accept loop for both, so "one pool, two protocols" stops being something
 two libraries have to cooperate on.
 
-#### Rename `opcua_log.h` -> `baremetal_log.h`
+#### The debug log is temporary scaffolding, not a component
 
-The debug log wears an OPC-UA name but is already a shared transport: eleven
-files include it, among them `Baremetal.ino`, `baremetal_net.cpp` and
-`s7comm_server.cpp`. S7Comm including an OPC-UA header is the same wart that
-`opcua_net.h` -> `baremetal_net.h` already fixed once; this file was missed.
+`opcua_log.h/.cpp` serves a line-oriented log on TCP port 23 so a developer can
+`telnet <device> 23` and watch the protocol work. It exists because the LOGO!
+has no accessible serial port and no display worth logging to, which leaves the
+network as the only diagnostic channel.
 
-Scope, following the `BM_NET_*` / `bm_net::` convention that rename set:
+It is development scaffolding and **must not ship**. Three facts shape what to
+do about it:
 
-| from | to | occurrences |
-|------|----|------------:|
-| `opcua_log.h` / `.cpp` | `baremetal_log.h` / `.cpp` | 2 files |
-| `OPCUA_LOG_H` | `BAREMETAL_LOG_H` | 3 |
-| `OPCUA_LOG(...)` | `BM_LOG(...)` | 47 |
-| `OPCUA_DEBUG_LOG` | `BM_DEBUG_LOG` | 6 |
-| `opcua_logf` | `bm_logf` | 6 |
-| `opcua_log_begin` / `_poll` / `_netstats` | `bm_log_*` | — |
+1. **It is already compiled out.** `OPCUA_DEBUG_LOG` defaults to 0 and nothing
+   outside the source can turn it on — no project setting, no VPP field, no
+   codegen path. It costs nothing in a shipped binary today, so removing it is
+   source hygiene rather than closing a live exposure.
 
-11 files touched in total.
+2. **Do not rename it.** An earlier revision of this plan proposed
+   `opcua_log.h` -> `baremetal_log.h` to fix S7Comm including an OPC-UA header.
+   That is churn across 11 files and 62 symbols for a name nobody keeps.
+   Dropped.
 
-**Sequencing across branches.** The file is shared, so the rename is done
-**on the OPC-UA branch first**, and the S7Comm branch is adjusted to match
-**after the OPC-UA branch has landed**. Doing it on both concurrently would
-guarantee a conflict in `s7comm_server.cpp`, which includes the header today.
+3. **Ten of the call sites are a problem regardless of when it dies**, because
+   they are in files topic 2 moves:
 
-Acceptance: the library builds and runs from a non-OpenPLC sketch; the runtime
-contains no `UA_*` platform implementation; both repos' CI green.
+   | | `OPCUA_LOG` calls |
+   |---|---:|
+   | moves into the library (`opcua_arch_tcp`, `opcua_arch`, `opcua_nodestore`) | **10** |
+   | stays in the runtime (`opcua_server`, `opcua_nodes`, `s7comm_server`, `baremetal_net`, `Baremetal.ino`) | 39 |
+
+   A portable Arduino library cannot include a LOGO debug header. So as part of
+   topic 2, library code logs through **open62541's own `UA_Logger`** — already
+   present in our build, it is where the 24-byte `UA_Log_Stdout_new` in the
+   profile comes from. The telnet channel then becomes a `UA_Logger` backend
+   that the *sketch* installs: the same shape as everything else here, where
+   the library declares a seam and the application supplies it and can delete
+   it freely. The other 39 calls are application code and die with the
+   scaffolding.
+
+**Timing: remove it after topic 3, not before topic 1.** This is the only
+diagnostic channel on a serial-less board, and topics 1-3 are the largest
+restructuring this code has had. Removing it first means doing that work blind
+on hardware. Release gate, not a prerequisite.
+
+Worth adding when it is removed: a build-time assertion that
+`OPCUA_DEBUG_LOG == 0` for release and VPP builds, so a future reintroduction
+cannot ship enabled by accident.
 
 ### Topic 3 — optimise, so RAM is decoupled from node count
 
