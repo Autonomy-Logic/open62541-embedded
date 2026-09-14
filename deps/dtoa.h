@@ -35,7 +35,7 @@ extern "C" {
 // Prints a double-value as a readable string. The buffer must be at least 24
 // chars wide. Returns the number of printed characters. Does not
 // null-terminate.
-unsigned dtoa(double d, char* buffer);
+unsigned ua_dtoa(double d, char* buffer);
 
 #ifdef __cplusplus
 }

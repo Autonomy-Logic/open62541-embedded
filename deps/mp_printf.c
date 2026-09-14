@@ -290,7 +290,7 @@ print_floating_point(output_t *output, double value, size_t precision,
     //    precision = PRINTF_DEFAULT_FLOAT_PRECISION;
 
     char buf[PRINTF_DECIMAL_BUFFER_SIZE];
-    unsigned len = dtoa(value, buf); // Fill the buffer (TODO: Consider precision)
+    unsigned len = ua_dtoa(value, buf); // Fill the buffer (TODO: Consider precision)
     out_(output, buf, len); // Print the buffer
 }
 

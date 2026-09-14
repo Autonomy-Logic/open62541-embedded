@@ -333,7 +333,7 @@ emit_digits(char* digits, unsigned ndigits, char* dest, int K, bool neg) {
     return idx;
 }
 
-unsigned dtoa(double d, char* buffer) {
+unsigned ua_dtoa(double d, char* buffer) {
     uint64_t bits = 0;
     memcpy(&bits, &d, sizeof(double));
 

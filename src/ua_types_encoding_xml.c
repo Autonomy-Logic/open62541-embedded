@@ -387,7 +387,7 @@ ENCODE_XML(Float) {
     if(*src == -INFINITY)
         return xmlEncodeWriteChars(ctx, "-INF", 4);
 
-    len = dtoa((UA_Double)*src, buffer);
+    len = ua_dtoa((UA_Double)*src, buffer);
     return xmlEncodeWriteChars(ctx, buffer, len);
 }
 
@@ -402,7 +402,7 @@ ENCODE_XML(Double) {
     if(*src == -INFINITY)
         return xmlEncodeWriteChars(ctx, "-INF", 4);
 
-    len = dtoa(*src, buffer);
+    len = ua_dtoa(*src, buffer);
     return xmlEncodeWriteChars(ctx, buffer, len);
 }
 

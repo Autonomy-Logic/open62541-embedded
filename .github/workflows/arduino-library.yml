@@ -73,6 +73,30 @@ jobs:
             exit 1
           fi
 
+      # The step above compiles only open62541.c, which would still pass if the
+      # Arduino platform layer were broken or missing entirely. Since the
+      # library now ships that layer, the claim worth testing is "a sketch can
+      # include this and get a server" — so build the example, as a sketch, on
+      # a real core. ESP32 is Xtensa and Nucleo is Cortex-M: two toolchains
+      # that agree on nothing except the Arduino API, which is the point.
+      - name: Compile the example sketch on real cores
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh -s 0.35.3
+          export PATH="$PWD/bin:$PATH"
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls \
+            https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+          arduino-cli core install STMicroelectronics:stm32
+          arduino-cli lib install Ethernet
+          for FQBN in esp32:esp32:esp32 STMicroelectronics:stm32:Nucleo_144; do
+            echo "=== $FQBN ==="
+            arduino-cli compile --fqbn "$FQBN" \
+              --library build-arduino/library \
+              build-arduino/library/examples/SimpleServer
+          done
+
       - name: Publish to the arduino-library branch
         if: github.ref == 'refs/heads/arduino-embedded'
         run: |

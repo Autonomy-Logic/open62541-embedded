@@ -111,9 +111,27 @@ if ! grep -q '^const UA_DataType UA_TYPES\[' "$BUILD/open62541.c"; then
     exit 1
 fi
 
-rm -rf "$OUT"; mkdir -p "$OUT/src"
+rm -rf "$OUT"; mkdir -p "$OUT/src/arduino"
 cp "$BUILD/open62541.c" "$BUILD/open62541.h" "$OUT/src/"
 cp "$ROOT/LICENSE" "$OUT/LICENSE"
+
+# The Arduino platform layer: the clock, EventLoop, ConnectionManager and
+# allocator that UA_ARCHITECTURE=none leaves for the integrator. Without these
+# the amalgamation does not link, and every sketch would have to write them.
+#
+# Public headers go to src/ root and implementation to src/arduino/, because
+# arduino-cli resolves a library's includes by basename at src/ root -- a
+# header in a subdirectory is invisible to `#include <...>` while its .cpp is
+# still compiled. Arduino compiles src/ recursively, so the split costs
+# nothing.
+ARCH="$ROOT/arch/arduino"
+cp "$ARCH/open62541_arduino.h" "$ARCH/UA_ArduinoListener.h" "$OUT/src/"
+cp "$ARCH/arduino_internal.h" "$ARCH"/*.cpp                 "$OUT/src/arduino/"
+
+# Examples are how anyone finds out the library stands on its own.
+if [ -d "$ROOT/arch/arduino/examples" ]; then
+    cp -R "$ROOT/arch/arduino/examples" "$OUT/examples"
+fi
 
 cat > "$OUT/library.properties" <<PROPS
 name=open62541
@@ -121,7 +139,7 @@ version=$UA_VERSION
 author=open62541 authors
 maintainer=Autonomy Logic <noreply@autonomylogic.com>
 sentence=OPC UA stack (open62541) packaged as a source library for Arduino.
-paragraph=Amalgamated build of open62541 with UA_ARCHITECTURE=none: the sketch supplies the clock, EventLoop and ConnectionManager, so the library is independent of any one board's network stack. Encryption, subscriptions, method calls, historizing, discovery, node management and PubSub are compiled out for size. Needs roughly 190 KB of flash and a few KB of RAM plus whatever address space you build, so it does not fit 8-bit parts. MPL-2.0.
+paragraph=Amalgamated open62541 plus an Arduino platform layer: clock, cooperative EventLoop, TCP ConnectionManager and a bounded allocator. Runs on any core, because it never opens a listening socket -- your sketch accepts connections and hands them over, the one design that does not need a list of supported boards. Encryption, subscriptions, method calls, historizing, discovery, node management and PubSub are compiled out for size. Needs roughly 190 KB of flash plus a configurable arena, so it does not fit 8-bit parts. MPL-2.0.
 category=Communication
 url=https://github.com/Autonomy-Logic/open62541-embedded
 architectures=*
@@ -130,33 +148,95 @@ PROPS
 cat > "$OUT/README.md" <<'README'
 # open62541 for Arduino
 
-The [open62541](https://github.com/open62541/open62541) OPC UA stack, packaged
-as a **source** Arduino library so it compiles for any architecture
-`arduino-cli` supports rather than only the ones someone remembered to
-cross-compile for.
+An OPC-UA server for microcontrollers. Amalgamated open62541 plus an Arduino
+platform layer -- clock, cooperative EventLoop, TCP ConnectionManager and a
+bounded allocator -- so a sketch can run a server without writing any of that.
 
-This branch is **generated**. Do not edit it — changes belong on
-`arduino-embedded`, and CI regenerates this from there.
+## Quick start
 
-## What it is
+```cpp
+#include <Ethernet.h>
+#include <open62541_arduino.h>
+#include <UA_ArduinoListener.h>
 
-A single `open62541.c` / `open62541.h` pair, produced by upstream's
-`UA_ENABLE_AMALGAMATION` with an option set chosen for microcontrollers:
-`UA_ARCHITECTURE=none`, no encryption, no subscriptions, no method calls, no
-historizing, no discovery, no node management, no PubSub, namespace zero
-`MINIMAL`, and allocations routed through `UA_ENABLE_MALLOC_SINGLETON`.
+UA_ArduinoListener<EthernetServer, EthernetClient> listener(4840);
+UA_Server* server;
 
-`UA_ARCHITECTURE=none` means **the application supplies the platform layer** —
-the clock, the EventLoop and the ConnectionManager. That is deliberate: it is
-what keeps the library independent of any particular board's network stack.
-You will need to provide those six symbols. The OpenPLC baremetal runtime is a
-worked example.
+void setup() {
+    Ethernet.begin(mac, ip);
+    listener.begin();
+    UA_Arduino_setDiscoveryAddress("192.168.1.50");
+
+    server = UA_Server_new();
+    UA_ServerConfig_setMinimal(UA_Server_getConfig(server), 4840, NULL);
+    UA_Server_run_startup(server);
+}
+
+void loop() {
+    listener.poll();
+    UA_Server_run_iterate(server, false);
+}
+```
+
+See `examples/SimpleServer`.
+
+## Your sketch owns the listening socket
+
+This library never opens one. That looks like extra work for two lines, and it
+is the only design that runs on every core.
+
+Arduino's `Client` is a real abstraction -- eleven pure virtuals. Arduino's
+`Server`, on every core including the official ArduinoCore-API, is this in its
+entirety:
+
+```cpp
+class Server : public Print {
+  public:
+    virtual void begin() = 0;
+};
+```
+
+There is no portable accept. `EthernetServer::available()` returns an
+`EthernetClient` *by value*; `WiFiServer::available()` returns a `WiFiClient` by
+value; neither overrides anything. A library that owned the listener would have
+to name concrete server classes behind board macros, and would then work only
+on the boards someone remembered to add.
+
+So we do what Arduino themselves do in ArduinoModbus: include `<Client.h>`,
+never `<Server.h>`, name no board, and take connections from the sketch.
+`UA_ArduinoListener` is a convenience on top of that -- if it does not suit your
+core, call `UA_Arduino_acceptClient()` yourself and everything still works.
+
+## Configuration
+
+All compile-time, all overridable from the sketch or a build flag:
+
+| macro | default | |
+|---|---|---|
+| `UA_ARDUINO_ARENA_SIZE` | 65536 | the server's entire heap; 0 uses the standard allocator |
+| `UA_ARDUINO_MAX_CONNECTIONS` | 4 | concurrent clients |
+| `UA_ARDUINO_RECV_BUFFER_SIZE` | 8192 | a protocol floor, not a preference (Part 6 6.7.1) |
+| `UA_ARDUINO_MAX_TIMERS` | 24 | repeated callbacks the EventLoop can hold |
+| `UA_ARDUINO_EPOCH_UNIX` | 2026-01-01 | wall clock for boards with no RTC; see `UA_Arduino_setTime()` |
+
+`UA_Arduino_getArenaStats()` reports usage, peak and refused allocations, so you
+can size the arena from a real workload rather than a guess.
 
 ## Size
 
-Roughly **190 KB of flash** and a few KB of static RAM, plus whatever your
-address space costs. It will not fit an 8-bit AVR. `architectures=*` is a
-statement about portability, not about every board having room.
+Roughly **190-200 KB of flash**, plus the arena and an 8 KB receive buffer in
+RAM. A server currently needs about **33 KB of arena at rest**, so parts with
+32 KB of RAM will link but exhaust the arena at runtime; that figure is the
+subject of ongoing work. It does not fit 8-bit AVR at all. `architectures=*` is
+a statement about portability, not about every board having room.
+
+Built and linked against: rp2040, ESP32, STM32 (Nucleo-144), SAMD (P1AM-200),
+and TI Tiva TM4C.
+
+## What is compiled out
+
+Encryption, subscriptions, method calls, historizing, discovery, node
+management and PubSub. Namespace zero is `MINIMAL`.
 
 ## Install
 
@@ -167,17 +247,26 @@ arduino-cli configuration.)
 
 ## Changes from upstream
 
-Two, both on the `arduino-embedded` branch and both offered upstream:
+All on the `arduino-embedded` branch, all offered upstream:
 
 - **The amalgamation honours `UA_ARCHITECTURE=none`.** Upstream force-adds the
   POSIX clock and eventloop whenever amalgamation is on, so the freestanding
   amalgamation the option exists to serve would not compile.
 - **The generated type tables are `const`.** Measured on Cortex-M4:
-  **−45,504 bytes of RAM for +8 bytes of flash.**
+  **-45,504 bytes of RAM for +8 bytes of flash.**
+- **`UA_ARCHITECTURE=none` declares the platform factories it calls.**
+  `ua_config_default.c` references `UA_EventLoop_new_POSIX` and friends on every
+  architecture, but they are declared only for POSIX and WIN32 -- so a
+  freestanding build failed on an implicit declaration, which newer compilers
+  treat as an error.
+- **`dtoa` is renamed `ua_dtoa`.** The old newlib shipped with some SAMD
+  toolchains declares a different `dtoa` in `<stdlib.h>`, and the collision
+  made the amalgamation uncompilable there.
 
 ## Licence
 
-MPL-2.0, unchanged from upstream. See `LICENSE`.
+MPL-2.0, unchanged from upstream, and the Arduino platform layer in
+`arch/arduino/` is MPL-2.0 too. See `LICENSE`.
 README
 
 echo "==> library assembled at $OUT"

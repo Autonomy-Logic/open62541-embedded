@@ -394,7 +394,7 @@ ENCODE_JSON(Float) {
     if(*src == -INFINITY)
         return writeChars(ctx, "\"-Infinity\"", 11);
 
-    len = dtoa((UA_Double)*src, buffer);
+    len = ua_dtoa((UA_Double)*src, buffer);
 
     if(ctx->pos + len > ctx->end)
         return UA_STATUSCODE_BADENCODINGLIMITSEXCEEDED;
@@ -415,7 +415,7 @@ ENCODE_JSON(Double) {
     if(*src == -INFINITY)
         return writeChars(ctx, "\"-Infinity\"", 11);
 
-    len = dtoa(*src, buffer);
+    len = ua_dtoa(*src, buffer);
 
     if(ctx->pos + len > ctx->end)
         return UA_STATUSCODE_BADENCODINGLIMITSEXCEEDED;
