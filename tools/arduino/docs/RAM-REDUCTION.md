@@ -120,6 +120,12 @@ the LOGO runs lwIP — but that port is built on `lwip/sockets.h` and
 is `NO_SYS=1`, `LWIP_SOCKET=0`, `LWIP_NETCONN=0` — raw callback API, bare
 superloop. Writing our own connection manager was forced, not a shortcut.
 
+The right port for this repo is not lwIP anyway: it is **Arduino**. This repo
+ships an Arduino library, so its `/arch` layer should target the Arduino
+network API and work on any core — lwIP, WIZnet shield, ESP32 WiFi or
+otherwise — rather than any one stack underneath it. See the parallel
+workstream in the plan below.
+
 Bucketing the 44,816-byte peak by layer rather than by authorship:
 
 | layer | bytes | share | authored by |
@@ -304,26 +310,92 @@ detail yet. Derive the arena size from declared project settings, have the VPP
 declare a *maximum* rather than a fixed size, and keep the exhaustion counter
 so overruns stay observable rather than silent.
 
-### Orthogonal — `/arch` statics
+### Parallel workstream — the Arduino `/arch` port belongs in this repo
 
-Independent of both phases above: needs no upstream change, informs no
-nodestore decision, and can land on its own schedule. It is library-layer work
-in the sense that matters (it fills upstream's `/arch` slot), but it is work we
-can do unilaterally.
+This repo packages open62541 as an **Arduino library**. An Arduino library is
+expected to work against the Arduino network API, so that any sketch on any
+core can `#include` it and go — and the OpenPLC baremetal runtime is then just
+one sketch among others rather than a special case. That means the `/arch`
+port is this repo's deliverable, not the integrator's.
 
-Make `ArduinoTcpCM` (8,416) and the `UA_EventLoop_new_Arduino` allocation
-(1,272) file-scope statics, and give `cm_alloc` a two-slot static send buffer
-(8,192 + 256, matching the measured `n=2`) with an arena fallback (8,240 peak).
+An earlier revision of this doc argued the opposite, on the grounds that a
+board-coupled connection manager would tax every rebase onto upstream. That
+was wrong twice over. Upstream's own convention is `arch/<name>/`, so an
+`arch/arduino/` is new files in a new directory that conflict with nothing.
+And the connection manager is not board-coupled: `opcua_arch_tcp.cpp` is 436
+lines with **zero** board macros, because it is already typed on Arduino's
+abstract `Client`. Of the 1,425 lines of arch and net code in the runtime
+today, the only file that names a board is `baremetal_net.h` — 10 references
+in 258 lines — and it names them for exactly one reason, below.
+
+(Upstream's porting guide also directs ports to edit
+`plugins/ua_config_default.c`. We avoid touching it by shipping our own
+`UA_ServerConfig_setDefault_Arduino()`, keeping the delta to added files.)
+
+#### The obstacle is in Arduino, not in us
+
+`Client` is a real abstraction — eleven pure virtuals covering `connect`,
+`read`, `write`, `available`, `peek`, `flush`, `stop`, `connected` and
+`operator bool`. Any `EthernetClient` or `WiFiClient` is usable as a `Client&`.
+
+`Server` is not an abstraction at all. Verified identical across seven cores
+including the official ArduinoCore-API:
+
+```cpp
+class Server : public Print {
+  public:
+    virtual void begin() = 0;
+};
+```
+
+There is no portable accept. `EthernetServer::available()` returns an
+`EthernetClient` **by value**; `WiFiServer::available()` returns a `WiFiClient`
+by value; neither overrides anything. So a *client*-side protocol can be
+written once against `Client&` and run everywhere, and a *server*-side one
+cannot. That asymmetry is the whole reason `baremetal_net.h` carries a board
+table and a hard `#error`: it is supplying the missing half of the Arduino
+network API.
+
+#### The seam
+
+The library defines the interface and never names a board:
+
+```cpp
+class UA_ArduinoListener {
+public:
+    virtual ~UA_ArduinoListener() {}
+    virtual void    begin()  = 0;
+    virtual Client* accept() = 0;   // nullptr when nothing is pending
+};
+
+template <class ServerT, class ClientT>
+class UA_ArduinoListenerFor : public UA_ArduinoListener { /* ~15 lines */ };
+```
+
+plus `__has_include`-guarded typedefs for the cores people actually use
+(`Ethernet.h`, `WiFi.h`, `WiFiS3.h`, `ETH.h`). Common core: include, one
+typedef, done. Exotic core: implement two methods. An unrecognised board stops
+being a compile-time `#error` in someone else's board table and becomes a
+fifteen-line adapter in the sketch.
+
+OpenPLC then keeps its shared slot pool by implementing that same interface
+over it. That is the right split: "OPC-UA and S7Comm share one budget" is a
+resource-policy decision belonging to the application, not to either library.
+
+#### Why this is the same work as the RAM reduction
+
+Moving the connection manager into the library is exactly the moment to make
+its receive and send buffers static, because a library sizing them from a
+compile-time constant is better design than a sketch mallocing them. So the
+`/arch` allocations — `ArduinoTcpCM` 8,416, `UA_EventLoop_new_Arduino` 1,272,
+and the 8,240-byte send buffer — come off the arena as a side effect of
+packaging the library properly.
 
 - Expected: −9,688 static, −8,240 peak.
-- Risk: very low. No open62541 change, no protocol change.
-- These files currently live in the editor's `resources/sources/Baremetal/`,
-  which is a poor home for something that is architecturally a `/arch` port —
-  it is not editor UI, and it is not OpenPLC application logic. Where it
-  belongs is an open question, but the answer is not this repo either: the
-  fork's delta over upstream is deliberately just `tools/arduino/`, and a
-  board-coupled connection manager in it would tax every future rebase. The
-  candidate homes are the Arduino core and a shared baremetal runtime.
+- Risk: low on the RAM side, moderate on the API side — the listener interface
+  is a public API and wants to be right the first time.
+- Independent of Phase 1: different files, no shared decisions. Can run in
+  parallel.
 
 ### Remaining one-shot config structures
 
