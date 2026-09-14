@@ -213,11 +213,24 @@ All compile-time, all overridable from the sketch or a build flag:
 
 | macro | default | |
 |---|---|---|
-| `UA_ARDUINO_ARENA_SIZE` | 65536 | the server's entire heap; 0 uses the standard allocator |
-| `UA_ARDUINO_MAX_CONNECTIONS` | 4 | concurrent clients |
-| `UA_ARDUINO_RECV_BUFFER_SIZE` | 8192 | a protocol floor, not a preference (Part 6 6.7.1) |
+Runtime, because a generated project chooses them and a compile-time macro
+could not reach this library anyway — arduino-cli does not put the sketch
+include path on library compilation:
+
+| call | |
+|---|---|
+| `UA_Arduino_setArena(buf, size)` | the server's entire heap; **you own the buffer**. Omit it and the standard allocator is used |
+| `UA_Arduino_configureTcp(maxConns, recvSize)` | concurrent clients, receive buffer (clamped up to the 8192 Part 6 6.7.1 floor) |
+| `UA_Nodestore_newFlash(..., poolSlots)` | simultaneously materialised nodes |
+| `UA_Arduino_setTime(unixSeconds)` | wall clock, for boards with no RTC |
+| `UA_Arduino_setDiscoveryAddress(host)` | what the endpoint URL advertises |
+
+Compile-time, because nothing per-project depends on it:
+
+| macro | default | |
+|---|---|---|
 | `UA_ARDUINO_MAX_TIMERS` | 24 | repeated callbacks the EventLoop can hold |
-| `UA_ARDUINO_EPOCH_UNIX` | 2026-01-01 | wall clock for boards with no RTC; see `UA_Arduino_setTime()` |
+| `UA_ARDUINO_EPOCH_UNIX` | 2026-01-01 | wall clock before `UA_Arduino_setTime()` |
 
 `UA_Arduino_getArenaStats()` reports usage, peak and refused allocations, so you
 can size the arena from a real workload rather than a guess.
@@ -230,8 +243,10 @@ RAM. A server currently needs about **33 KB of arena at rest**, so parts with
 subject of ongoing work. It does not fit 8-bit AVR at all. `architectures=*` is
 a statement about portability, not about every board having room.
 
-Built and linked against: rp2040, ESP32, STM32 (Nucleo-144), SAMD (P1AM-200),
-and TI Tiva TM4C.
+Built and linked against: rp2040, ESP32, STM32 (Nucleo-144), SAMD (P1AM-200)
+and TI Tiva TM4C. The SAMD21 in a P1AM-100 has 32 KB of RAM total, so the
+example's 40 KB arena does not fit — shrink it there, though a server needs
+about 33 KB at rest, so that part is not currently a realistic target.
 
 ## What is compiled out
 

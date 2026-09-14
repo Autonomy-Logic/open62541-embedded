@@ -52,8 +52,10 @@
 
 /** @tparam ServerT  concrete server, e.g. EthernetServer, WiFiServer
  *  @tparam ClientT  the client it hands out, e.g. EthernetClient
- *  @tparam N        client slots; defaults to the library's connection limit */
-template <class ServerT, class ClientT, size_t N = UA_ARDUINO_MAX_CONNECTIONS>
+ *  @tparam N        client slots. Must not exceed what you passed to
+ *                   UA_Arduino_configureTcp(), or accepted clients will be
+ *                   refused by the server and immediately closed. */
+template <class ServerT, class ClientT, size_t N = UA_ARDUINO_DEFAULT_MAX_CONNECTIONS>
 class UA_ArduinoListener
 {
 public:

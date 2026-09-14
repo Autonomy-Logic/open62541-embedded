@@ -26,6 +26,12 @@ IPAddress ip(192, 168, 1, 50);
 UA_Server* server = nullptr;
 UA_Int32   counter = 0;
 
+/* The server's entire heap. Static at file scope, so it is a link-time
+ * reservation: this either fits on the part or the build fails here rather
+ * than on the device. Size it from UA_Arduino_getArenaStats() on a real
+ * workload; 40 KB is comfortable for a handful of nodes and one client. */
+static uint8_t opcuaArena[40 * 1024];
+
 static void addCounterNode(UA_Server* s)
 {
     UA_VariableAttributes attr = UA_VariableAttributes_default;
@@ -56,6 +62,9 @@ void setup()
     /* Tell the server its own address, so the endpoint URL it publishes is
      * one a client can actually dial. Only the sketch knows this. */
     UA_Arduino_setDiscoveryAddress("192.168.1.50");
+
+    UA_Arduino_setArena(opcuaArena, sizeof(opcuaArena));
+    UA_Arduino_configureTcp(2, 8192);
 
     server = UA_Server_new();
     UA_ServerConfig* config = UA_Server_getConfig(server);

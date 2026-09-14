@@ -84,21 +84,15 @@
  * point of this port is that a server's memory cost is known at link time.
  * ------------------------------------------------------------------------- */
 
-/** Concurrent client connections this library will hold. Each costs a pointer
- *  and a little bookkeeping here; the client object itself is yours. */
-#ifndef UA_ARDUINO_MAX_CONNECTIONS
-#define UA_ARDUINO_MAX_CONNECTIONS 4
-#endif
+/** Defaults for UA_Arduino_configureTcp(). Both are runtime settings rather
+ *  than compile-time ones so a generated project can choose them; see the
+ *  arena note below for why a macro could not reach this library anyway. */
+#define UA_ARDUINO_DEFAULT_MAX_CONNECTIONS 4
 
-/** Receive buffer, shared across connections since a request is processed to
- *  completion before the next is read.
- *
- *  8192 is a protocol floor, not a preference: OPC-UA Part 6 6.7.1 requires a
- *  SecureChannel to accept an 8192-byte chunk, and open62541 enforces it. Going
- *  below it makes the server reject conformant clients. */
-#ifndef UA_ARDUINO_RECV_BUFFER_SIZE
-#define UA_ARDUINO_RECV_BUFFER_SIZE 8192
-#endif
+/** 8192 is a protocol floor, not a preference: OPC-UA Part 6 6.7.1 requires a
+ *  SecureChannel to accept an 8192-byte chunk, and open62541 enforces it.
+ *  Going below it makes the server reject conformant clients. */
+#define UA_ARDUINO_DEFAULT_RECV_BUFFER 8192
 
 /** Repeated callbacks the EventLoop can hold.
  *
@@ -141,8 +135,20 @@ extern "C" {
  *  tolerates and a control loop's timing does not. */
 UA_EventLoop* UA_EventLoop_new_Arduino(const UA_Logger* logger);
 
-/** TCP ConnectionManager over the clients you hand us. Opens nothing. */
+/** TCP ConnectionManager over the clients you hand us. Opens nothing.
+ *
+ *  Both buffers come from the arena, so this must be called after
+ *  UA_Arduino_setArena(). UA_ServerConfig_setMinimal() calls it for you. */
 UA_ConnectionManager* UA_ConnectionManager_new_Arduino_TCP(const UA_String eventSourceName);
+
+/** Size the connection manager. Call before UA_Server_new(), which is when the
+ *  server builds it; after that it has no effect.
+ *
+ *  `maxConnections` is concurrent clients. `recvBufferSize` must be at least
+ *  UA_ARDUINO_DEFAULT_RECV_BUFFER or conformant clients will be rejected --
+ *  a smaller value is clamped up rather than silently honoured. Zero for
+ *  either keeps the current setting. */
+void UA_Arduino_configureTcp(uint8_t maxConnections, size_t recvBufferSize);
 
 /* -------------------------------------------------------------------------
  * Handing connections to the server
@@ -172,7 +178,7 @@ void UA_Arduino_setClosedCallback(UA_Arduino_ClosedFn fn, void* context);
  *  a temporary -- see LIFETIME above.
  *
  *  Returns GOOD when adopted, BADCONNECTIONREJECTED when
- *  UA_ARDUINO_MAX_CONNECTIONS are already held (the caller should stop() the
+ *  the configured maximum are already held (the caller should stop() the
  *  client), or BADINVALIDARGUMENT for a null or already-held client. */
 UA_StatusCode UA_Arduino_acceptClient(Client* client);
 
@@ -216,15 +222,14 @@ void UA_Arduino_setTime(int64_t unixSeconds);
  * namespace zero especially -- is delegated untouched.
  * ------------------------------------------------------------------------- */
 
-/** Simultaneously materialised nodes.
+/** Default simultaneously-materialised nodes; UA_Nodestore_newFlash() takes
+ *  the real value.
  *
  *  Bounded by the OperationLimits: a Read walks its nodes one at a time, a
  *  Browse holds the browsed node plus what it is looking at. Deliberately
  *  small, and exhaustion is counted rather than tolerated, so a pool that is
  *  too small shows up in test instead of in the field. */
-#ifndef UA_ARDUINO_NODE_POOL_SLOTS
-#define UA_ARDUINO_NODE_POOL_SLOTS 8
-#endif
+#define UA_ARDUINO_DEFAULT_NODE_POOL_SLOTS 8
 
 typedef struct {
     /** Fill `out` with the node having this numeric id in namespace `ns`.
@@ -265,7 +270,8 @@ typedef struct {
  */
 UA_Nodestore* UA_Nodestore_newFlash(const UA_Arduino_FlashNodeSource* source,
                                     UA_Nodestore* inner,
-                                    const UA_Logger* logger);
+                                    const UA_Logger* logger,
+                                    uint16_t poolSlots);
 
 /** Peak simultaneous materialised nodes, and how many times the pool was
  *  exhausted. `exhausted` must be zero in a healthy build. */
@@ -274,32 +280,52 @@ void UA_Arduino_getNodestoreStats(uint16_t* outHighWater, uint32_t* outExhausted
 /* -------------------------------------------------------------------------
  * Bounded allocator
  *
- * open62541 calls UA_malloc on paths a server cannot avoid -- session setup,
- * per-request scratch. On a microcontroller sharing the sketch's heap with a
- * network-facing protocol parser means a remote peer can fragment the heap the
- * control logic depends on, so this library allocates from its own fixed
- * arena instead. The size is a link-time constant: the binary either fits or
- * does not, which is the property that matters on a part with no MMU.
+ * open62541 calls UA_malloc on paths a server cannot avoid: session setup,
+ * per-request scratch. Sharing the sketch's heap with a network-facing
+ * protocol parser means a remote peer can fragment the memory your control
+ * logic depends on, so give the server a buffer of its own instead.
  *
- * UA_ARDUINO_ARENA_SIZE of 0 disables the arena and routes UA_malloc to the
- * standard allocator, if you would rather manage that yourself.
+ * The library declares no arena. You own the buffer, which is the only
+ * arrangement that works: how much RAM a server may have is a decision only
+ * the application can make, and a library-side compile-time size could not be
+ * reached by a sketch's build anyway -- arduino-cli does not put the sketch
+ * include path on library compilation, so a generated header setting it would
+ * be silently ignored.
+ *
+ *     static uint8_t opcuaArena[24 * 1024];
+ *     UA_Arduino_setArena(opcuaArena, sizeof(opcuaArena));   // before UA_Server_new()
+ *
+ * Declared static at file scope, that is a link-time reservation: the binary
+ * either fits or it does not, decided on your machine rather than in the
+ * field. Pass nothing and UA_malloc falls through to the standard allocator,
+ * which works and gives up every property above.
+ *
+ * Sizing it: usage barely tracks node count, because nodes come from flash
+ * through a fixed pool and cost about 8 bytes each in parent references. The
+ * terms that matter are namespace zero (a constant), roughly 1 KB per
+ * concurrent session, and per-request scratch dominated by the send buffer.
+ * Measure with UA_Arduino_getArenaStats() rather than guessing.
  * ------------------------------------------------------------------------- */
 
-#ifndef UA_ARDUINO_ARENA_SIZE
-#define UA_ARDUINO_ARENA_SIZE (64 * 1024)
-#endif
-
 typedef struct {
-    size_t   size;         /* arena capacity, bytes */
+    size_t   size;         /* arena capacity, bytes; 0 if none was supplied */
     size_t   inUse;        /* currently allocated, including block headers */
-    size_t   highWater;    /* peak inUse since reset */
+    size_t   highWater;    /* peak inUse since the arena was set */
     size_t   largestFree;  /* biggest single allocation still possible */
     uint32_t failures;     /* allocations refused for want of room */
 } UA_Arduino_ArenaStats;
 
+/** Give the server its heap. Call before UA_Server_new().
+ *
+ *  The buffer must outlive the server. Passing NULL, or a size too small to
+ *  hold one allocation, reverts to the standard allocator. Calling it again
+ *  re-carves the arena and resets the statistics, so do not call it while a
+ *  server is running. */
+void UA_Arduino_setArena(void* buffer, size_t size);
+
 /** Read the arena's counters. Exhaustion is observable by design: a server
  *  that quietly stops answering is a far worse failure than one that tells
- *  you it ran out. */
+ *  you it ran out. `failures` should be zero in a healthy build. */
 void UA_Arduino_getArenaStats(UA_Arduino_ArenaStats* stats);
 
 #ifdef __cplusplus

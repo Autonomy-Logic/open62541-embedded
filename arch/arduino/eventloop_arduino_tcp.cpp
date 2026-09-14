@@ -31,14 +31,20 @@ struct Conn
  *
  *  open62541 models the listening socket as a connection of its own, so it
  *  needs an id that can never collide with a real one. Slots are numbered
- *  1..MAX, so MAX+1 is free by construction. */
-constexpr uintptr_t kListenerId = UA_ARDUINO_MAX_CONNECTIONS + 1;
+ *  1..maxConns, and 0 means "none", so UINTPTR_MAX is free whatever the
+ *  connection count turns out to be. */
+constexpr uintptr_t kListenerId = (uintptr_t)-1;
 
 struct ArduinoTcpCM
 {
     UA_ConnectionManager base;   // MUST be first: open62541 casts between them
-    Conn                 conns[UA_ARDUINO_MAX_CONNECTIONS];
-    uint8_t              recv[UA_ARDUINO_RECV_BUFFER_SIZE];
+    // conns[] and recv[] are carved out of one allocation that follows this
+    // struct, so their sizes are chosen at runtime rather than by a macro the
+    // sketch's build could not have reached anyway.
+    Conn*                conns;
+    uint8_t*             recv;
+    uint8_t              maxConns;
+    size_t               recvSize;
     bool                 listening;
     void*                listener_context;   // what accepted clients inherit
     UA_ConnectionManager_connectionCallback cb;
@@ -66,6 +72,10 @@ void*                g_closed_ctx    = nullptr;
  *  defaults to the unspecified address, which clients treat as "the host I
  *  connected to". */
 char g_discovery_address[40] = "0.0.0.0";
+
+/* Sizing for the next connection manager built. */
+uint8_t g_cfg_max_conns = UA_ARDUINO_DEFAULT_MAX_CONNECTIONS;
+size_t  g_cfg_recv_size = UA_ARDUINO_DEFAULT_RECV_BUFFER;
 
 ArduinoTcpCM* self(UA_ConnectionManager* cm) { return reinterpret_cast<ArduinoTcpCM*>(cm); }
 
@@ -171,7 +181,7 @@ UA_StatusCode cm_send(UA_ConnectionManager* cm, uintptr_t connectionId,
 {
     (void)params;
     ArduinoTcpCM* m = self(cm);
-    if (connectionId == 0 || connectionId > UA_ARDUINO_MAX_CONNECTIONS)
+    if (connectionId == 0 || connectionId > m->maxConns)
     {
         cm->freeNetworkBuffer(cm, connectionId, buf);
         return UA_STATUSCODE_BADCONNECTIONCLOSED;
@@ -225,7 +235,7 @@ UA_StatusCode cm_close(UA_ConnectionManager* cm, uintptr_t connectionId)
         }
         return UA_STATUSCODE_GOOD;
     }
-    if (connectionId == 0 || connectionId > UA_ARDUINO_MAX_CONNECTIONS)
+    if (connectionId == 0 || connectionId > m->maxConns)
         return UA_STATUSCODE_BADNOTFOUND;
     drop(m, (uint8_t)(connectionId - 1));
     return UA_STATUSCODE_GOOD;
@@ -253,7 +263,7 @@ UA_StatusCode es_start(UA_EventSource* es)
 void es_stop(UA_EventSource* es)
 {
     ArduinoTcpCM* m = reinterpret_cast<ArduinoTcpCM*>(es);
-    for (uint8_t i = 0; i < UA_ARDUINO_MAX_CONNECTIONS; i++)
+    for (uint8_t i = 0; i < m->maxConns; i++)
         drop(m, i);
     m->listening = false;
     es->state = UA_EVENTSOURCESTATE_STOPPED;
@@ -281,7 +291,7 @@ void ua_arduino_cm_poll(UA_ConnectionManager* cm)
     if (!m->listening)
         return;
 
-    for (uint8_t i = 0; i < UA_ARDUINO_MAX_CONNECTIONS; i++)
+    for (uint8_t i = 0; i < m->maxConns; i++)
     {
         Conn& c = m->conns[i];
         if (c.client == nullptr)
@@ -317,8 +327,8 @@ void ua_arduino_cm_poll(UA_ConnectionManager* cm)
         if (avail <= 0)
             continue;
         size_t want = (size_t)avail;
-        if (want > UA_ARDUINO_RECV_BUFFER_SIZE)
-            want = UA_ARDUINO_RECV_BUFFER_SIZE;
+        if (want > m->recvSize)
+            want = m->recvSize;
         const int got = c.client->read(m->recv, want);
         if (got <= 0)
             continue;
@@ -343,9 +353,26 @@ UA_ConnectionManager_new_Arduino_TCP(const UA_String eventSourceName)
 {
     ua_arduino_install_allocator();
 
-    ArduinoTcpCM* m = (ArduinoTcpCM*)UA_calloc(1, sizeof(ArduinoTcpCM));
+    // One allocation holding the struct, the connection table and the receive
+    // buffer, so the sizes are runtime values and there is still only a single
+    // arena block to account for.
+    const uint8_t maxConns = (g_cfg_max_conns > 0) ? g_cfg_max_conns
+                                                   : UA_ARDUINO_DEFAULT_MAX_CONNECTIONS;
+    size_t recvSize = (g_cfg_recv_size > 0) ? g_cfg_recv_size
+                                            : (size_t)UA_ARDUINO_DEFAULT_RECV_BUFFER;
+    if (recvSize < (size_t)UA_ARDUINO_DEFAULT_RECV_BUFFER)
+        recvSize = (size_t)UA_ARDUINO_DEFAULT_RECV_BUFFER;   // protocol floor
+
+    const size_t total = sizeof(ArduinoTcpCM) + (size_t)maxConns * sizeof(Conn) + recvSize;
+    ArduinoTcpCM* m = (ArduinoTcpCM*)UA_calloc(1, total);
     if (m == nullptr)
         return nullptr;
+
+    uint8_t* tail = reinterpret_cast<uint8_t*>(m) + sizeof(ArduinoTcpCM);
+    m->conns    = reinterpret_cast<Conn*>(tail);
+    m->recv     = tail + (size_t)maxConns * sizeof(Conn);
+    m->maxConns = maxConns;
+    m->recvSize = recvSize;
 
     UA_ConnectionManager* cm = &m->base;
     cm->eventSource.eventSourceType = UA_EVENTSOURCETYPE_CONNECTIONMANAGER;
@@ -374,12 +401,12 @@ extern "C" UA_StatusCode UA_Arduino_acceptClient(Client* client)
     if (!m->listening)
         return UA_STATUSCODE_BADCONNECTIONREJECTED;
 
-    for (uint8_t i = 0; i < UA_ARDUINO_MAX_CONNECTIONS; i++)
+    for (uint8_t i = 0; i < m->maxConns; i++)
     {
         if (m->conns[i].client == client)
             return UA_STATUSCODE_BADINVALIDARGUMENT;   // already held
     }
-    for (uint8_t i = 0; i < UA_ARDUINO_MAX_CONNECTIONS; i++)
+    for (uint8_t i = 0; i < m->maxConns; i++)
     {
         Conn& c = m->conns[i];
         if (c.client != nullptr)
@@ -401,7 +428,7 @@ extern "C" void UA_Arduino_releaseClient(Client* client)
 {
     if (client == nullptr || g_cm == nullptr)
         return;
-    for (uint8_t i = 0; i < UA_ARDUINO_MAX_CONNECTIONS; i++)
+    for (uint8_t i = 0; i < g_cm->maxConns; i++)
     {
         if (g_cm->conns[i].client != client)
             continue;
@@ -420,7 +447,7 @@ extern "C" size_t UA_Arduino_connectionCount(void)
     if (g_cm == nullptr)
         return 0;
     size_t n = 0;
-    for (uint8_t i = 0; i < UA_ARDUINO_MAX_CONNECTIONS; i++)
+    for (uint8_t i = 0; i < g_cm->maxConns; i++)
         if (g_cm->conns[i].client != nullptr)
             n++;
     return n;
@@ -436,6 +463,21 @@ extern "C" void UA_Arduino_setClosedCallback(UA_Arduino_ClosedFn fn, void* conte
 {
     g_closed     = fn;
     g_closed_ctx = context;
+}
+
+extern "C" void UA_Arduino_configureTcp(uint8_t maxConnections, size_t recvBufferSize)
+{
+    if (maxConnections > 0)
+        g_cfg_max_conns = maxConnections;
+    if (recvBufferSize > 0)
+    {
+        // Clamp rather than honour: below the Part 6 6.7.1 floor the server
+        // rejects conformant clients, which looks like a broken server rather
+        // than a misconfigured one.
+        g_cfg_recv_size = (recvBufferSize < (size_t)UA_ARDUINO_DEFAULT_RECV_BUFFER)
+                              ? (size_t)UA_ARDUINO_DEFAULT_RECV_BUFFER
+                              : recvBufferSize;
+    }
 }
 
 extern "C" void UA_Arduino_setDiscoveryAddress(const char* host)

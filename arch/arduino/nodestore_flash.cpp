@@ -45,16 +45,6 @@
 
 namespace {
 
-/** How many of our nodes open62541 may hold materialised at once.
- *
- *  Bounded by the OperationLimits (§4.6): a Read walks its nodes one at a
- *  time, a Browse holds the browsed node plus what it is looking at. The pool
- *  is deliberately small, and exhaustion is counted rather than silently
- *  tolerated -- a pool that is too small must show up in test. */
-#ifndef UA_ARDUINO_NODE_POOL_SLOTS
-#define UA_ARDUINO_NODE_POOL_SLOTS 8
-#endif
-
 struct PoolSlot
 {
     UA_VariableNode node;
@@ -68,7 +58,8 @@ struct FlashNodestoreImpl
     UA_Arduino_FlashNodeSource source;
     const UA_Logger* logger;
     UA_UInt16     ns;
-    PoolSlot      pool[UA_ARDUINO_NODE_POOL_SLOTS];
+    PoolSlot*     pool;          // follows the struct in one allocation
+    uint16_t      poolSlots;
     uint16_t      live;
     uint16_t      high_water;
     uint32_t      exhausted;
@@ -91,13 +82,13 @@ bool from_pool(FlashNodestoreImpl* m, const UA_Node* n)
 {
     const uintptr_t p = (uintptr_t)n;
     const uintptr_t lo = (uintptr_t)&m->pool[0];
-    const uintptr_t hi = (uintptr_t)&m->pool[UA_ARDUINO_NODE_POOL_SLOTS];
+    const uintptr_t hi = (uintptr_t)&m->pool[m->poolSlots];
     return p >= lo && p < hi;
 }
 
 const UA_Node* materialise(FlashNodestoreImpl* m, UA_UInt32 numeric_id)
 {
-    for (uint16_t i = 0; i < UA_ARDUINO_NODE_POOL_SLOTS; i++)
+    for (uint16_t i = 0; i < m->poolSlots; i++)
     {
         if (m->pool[i].in_use)
             continue;
@@ -117,8 +108,8 @@ const UA_Node* materialise(FlashNodestoreImpl* m, UA_UInt32 numeric_id)
     {
         UA_LOG_ERROR(m->logger, UA_LOGCATEGORY_SERVER,
                      "Flash nodestore: pool exhausted (%u slots). "
-                     "Raise UA_ARDUINO_NODE_POOL_SLOTS.",
-                     (unsigned)UA_ARDUINO_NODE_POOL_SLOTS);
+                     "Pass a larger poolSlots to UA_Nodestore_newFlash().",
+                     (unsigned)m->poolSlots);
     }
     return nullptr;
 }
@@ -305,14 +296,23 @@ void ns_iterate(UA_Nodestore* ns, UA_NodestoreVisitor visitor, void* visitorCtx)
 
 UA_Nodestore* UA_Nodestore_newFlash(const UA_Arduino_FlashNodeSource* source,
                                     UA_Nodestore* inner,
-                                    const UA_Logger* logger)
+                                    const UA_Logger* logger,
+                                    uint16_t poolSlots)
 {
     if (inner == nullptr || source == nullptr || source->materialise == nullptr ||
         source->dematerialise == nullptr)
         return nullptr;
-    FlashNodestoreImpl* m = (FlashNodestoreImpl*)UA_calloc(1, sizeof(FlashNodestoreImpl));
+    if (poolSlots == 0)
+        poolSlots = UA_ARDUINO_DEFAULT_NODE_POOL_SLOTS;
+    // Struct and pool in one allocation: the slot count is a runtime value, and
+    // one block is one thing to account for in the arena.
+    FlashNodestoreImpl* m = (FlashNodestoreImpl*)UA_calloc(
+        1, sizeof(FlashNodestoreImpl) + (size_t)poolSlots * sizeof(PoolSlot));
     if (m == nullptr)
         return nullptr;
+    m->pool      = reinterpret_cast<PoolSlot*>(reinterpret_cast<uint8_t*>(m) +
+                                               sizeof(FlashNodestoreImpl));
+    m->poolSlots = poolSlots;
 
     m->inner  = inner;
     m->ns     = source->namespaceIndex;

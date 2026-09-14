@@ -6,9 +6,22 @@
  */
 
 /*
- * A first-fit free-list allocator over one fixed static arena, installed as
+ * A first-fit free-list allocator over a buffer THE CALLER OWNS, installed as
  * open62541's UA_malloc/UA_free/UA_calloc/UA_realloc via
  * UA_ENABLE_MALLOC_SINGLETON.
+ *
+ * The library declares no arena of its own. You pass one to
+ * UA_Arduino_setArena() and the server allocates from it and nowhere else.
+ * That is deliberate: how much RAM a server may have is a decision only the
+ * application can make -- it is the thing that knows what else is running on
+ * the part, and on a generated project it is the thing that knows how many
+ * nodes and sessions were configured. A library-side compile-time constant
+ * could not be reached by a sketch's build anyway: arduino-cli does not put
+ * the sketch include path on library compilation, so a generated header
+ * setting the size would be silently ignored.
+ *
+ * Pass no arena and UA_malloc falls through to the standard allocator, which
+ * works but gives up every property below.
  *
  * Deliberately a boring allocator. It is not trying to be fast: a server
  * allocates on session setup and per-request scratch, at network timescales,
@@ -32,10 +45,8 @@
  */
 
 #include "arduino_internal.h"
-
-#if UA_ARDUINO_ARENA_SIZE > 0
-
 #include <string.h>
+#include <stdlib.h>
 
 namespace {
 
@@ -55,14 +66,16 @@ constexpr size_t kHeader = sizeof(BlockHeader);
 
 inline size_t align_up(size_t n) { return (n + (kAlign - 1)) & ~(kAlign - 1); }
 
-/** The arena.
+/** The caller's buffer. Null until UA_Arduino_setArena().
  *
- *  __attribute__((used)) is load-bearing. Arduino cores link with
- *  --gc-sections, and an array nothing demonstrably reads gets discarded --
- *  measured, silently, the whole of it. A dropped arena lets an over-budget
- *  build link cleanly and fail only on the device, which is the exact failure
- *  this arena exists to prevent. */
-__attribute__((used)) alignas(kAlign) uint8_t g_arena[UA_ARDUINO_ARENA_SIZE];
+ *  A note for whoever supplies it: declare it `static` at file scope in your
+ *  sketch, not on a stack. And if your core links with --gc-sections, make
+ *  sure something demonstrably reads it -- an array nothing touches has been
+ *  measured being discarded silently and entirely, which lets an over-budget
+ *  build link cleanly and fail only on the device. Passing it to
+ *  UA_Arduino_setArena() is that reference. */
+uint8_t* g_arena      = nullptr;
+size_t   g_arena_size = 0;
 
 bool     g_ready      = false;
 uint32_t g_in_use     = 0;
@@ -74,16 +87,16 @@ inline BlockHeader* first_block() { return reinterpret_cast<BlockHeader*>(g_aren
 inline BlockHeader* next_block(BlockHeader* b)
 {
     uint8_t* p = reinterpret_cast<uint8_t*>(b) + kHeader + b->size;
-    return (p >= g_arena + UA_ARDUINO_ARENA_SIZE) ? nullptr
-                                                  : reinterpret_cast<BlockHeader*>(p);
+    return (p >= g_arena + g_arena_size) ? nullptr
+                                         : reinterpret_cast<BlockHeader*>(p);
 }
 
 void init_if_needed()
 {
-    if (g_ready)
+    if (g_ready || g_arena == nullptr)
         return;
     BlockHeader* b = first_block();
-    b->size  = UA_ARDUINO_ARENA_SIZE - kHeader;
+    b->size  = (uint32_t)(g_arena_size - kHeader);
     b->free  = 1;
     g_in_use = 0;
     g_ready  = true;
@@ -122,8 +135,10 @@ BlockHeader* header_of(void* p)
 
 bool in_arena(const void* p)
 {
+    if (g_arena == nullptr)
+        return false;
     const uint8_t* c = static_cast<const uint8_t*>(p);
-    return c > g_arena && c < g_arena + UA_ARDUINO_ARENA_SIZE;
+    return c > g_arena && c < g_arena + g_arena_size;
 }
 
 void* arena_malloc(size_t size)
@@ -131,6 +146,8 @@ void* arena_malloc(size_t size)
     if (size == 0)
         return nullptr;
     init_if_needed();
+    if (g_arena == nullptr)
+        return malloc(size);   // no arena supplied: standard allocator
 
     const size_t want = align_up(size);
 
@@ -156,8 +173,16 @@ void* arena_malloc(size_t size)
 
 void arena_free(void* p)
 {
-    if (p == nullptr || !in_arena(p))
+    if (p == nullptr)
         return;
+    if (!in_arena(p))
+    {
+        // Either no arena was supplied, or this came from the standard
+        // allocator before one was. Freeing it there is correct; a pointer
+        // that is neither is a caller bug we cannot detect.
+        free(p);
+        return;
+    }
     BlockHeader* b = header_of(p);
     if (b->free)
         return;                       // double free: ignore rather than corrupt
@@ -199,18 +224,43 @@ void* arena_realloc(void* p, size_t size)
 
 } // namespace
 
+extern "C" void UA_Arduino_setArena(void* buffer, size_t size)
+{
+    // Refuse a buffer too small to hold even one header plus payload, rather
+    // than accept it and fail every allocation with no explanation.
+    if (buffer == nullptr || size < kHeader + kAlign)
+    {
+        g_arena      = nullptr;
+        g_arena_size = 0;
+        g_ready      = false;
+        return;
+    }
+    g_arena      = static_cast<uint8_t*>(buffer);
+    g_arena_size = size;
+    g_ready      = false;      // re-carve on next allocation
+    g_in_use     = 0;
+    g_high_water = 0;
+    g_failures   = 0;
+    ua_arduino_install_allocator();
+}
+
 extern "C" void UA_Arduino_getArenaStats(UA_Arduino_ArenaStats* stats)
 {
     if (stats == nullptr)
         return;
     init_if_needed();
+    if (g_arena == nullptr)
+    {
+        memset(stats, 0, sizeof(*stats));
+        return;
+    }
     size_t largest = 0;
     for (BlockHeader* b = first_block(); b != nullptr; b = next_block(b))
     {
         if (b->free && b->size > largest)
             largest = b->size;
     }
-    stats->size        = UA_ARDUINO_ARENA_SIZE;
+    stats->size        = g_arena_size;
     stats->inUse       = g_in_use;
     stats->highWater   = g_high_water;
     stats->largestFree = largest;
@@ -256,17 +306,3 @@ void ua_arduino_install_allocator(void)
 {
     ua_arduino_install_allocator_impl();
 }
-
-#else  /* UA_ARDUINO_ARENA_SIZE == 0: use the standard allocator */
-
-#include <string.h>
-
-void ua_arduino_install_allocator(void) { }
-
-extern "C" void UA_Arduino_getArenaStats(UA_Arduino_ArenaStats* stats)
-{
-    if (stats != nullptr)
-        memset(stats, 0, sizeof(*stats));
-}
-
-#endif
