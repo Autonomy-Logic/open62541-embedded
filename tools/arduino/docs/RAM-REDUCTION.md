@@ -1,20 +1,56 @@
-# DOPE-636 — Reducing open62541 RAM consumption on baremetal targets
+# DOPE-636 — Separating the OPC-UA library from the runtime, and cutting its RAM
 
 Phase 0: investigation and measurement. Everything below was measured on real
 hardware — a Siemens LOGO! 8.2 (TI Tiva TM4C1294, Cortex-M4F, 248 KB SRAM)
 running the OpenPLC baremetal runtime with the amalgamated
 `UA_ARCHITECTURE=none` Arduino library built from this repo at `c30dee7`.
 
-## Why this card exists
+## What this card is
 
-The baremetal OPC-UA server reserves a **fixed 64 KB arena** (`opcua_arena.cpp`
-in the editor's `resources/sources/Baremetal/`). On a part with 248 KB of SRAM,
-of which lwIP already takes ~100 KB, a fixed 64 KB block is the single largest
-line item in the budget, and it is reserved whether or not a client ever
-connects. The arena exists because open62541 calls `UA_malloc` on paths we
-cannot avoid, and an unbounded newlib heap shared with the PLC application is
-not something we are willing to ship. The question this card answers is how
-much of that 64 KB is actually necessary.
+The card opened as "shrink the 64 KB arena". Measuring it turned up a
+structural problem underneath: **library code is living in the application.**
+The connection manager, the EventLoop, the nodestore and the allocator all sit
+in the editor's `resources/sources/Baremetal/`, so this repo does not actually
+ship a usable Arduino library — it ships an amalgamation that works only if you
+also happen to have OpenPLC's platform layer. Optimising the arena without
+fixing that would mean doing the work in the wrong repo and then moving it.
+
+So the card is three topics, in order:
+
+1. **Make `open62541-embedded` a properly hardware-abstracted Arduino
+   library** — one any sketch on any core can `#include` and use.
+2. **Move every open62541-related file out of the baremetal runtime** into
+   that library, leaving the runtime with only application code: mapping PLC
+   variables onto nodes, and driving the server from the scan cycle.
+3. **Then optimise**, with the goal that RAM consumption is decoupled from the
+   number of nodes — everything static.
+
+Topic 3 is last because doing it first means doing it twice: the largest single
+allocation lives in a file topic 2 moves.
+
+### On the goal of topic 3
+
+Worth stating precisely, because part of it is already true. RAM **already**
+does not scale with the user's node count: project nodes are served from a
+`const` flash table through a fixed `OPCUA_NODE_POOL_SLOTS` pool, materialised
+on read and dematerialised after, and never enter the RAM nodestore. The 48
+node allocations in the profile are namespace zero's, and 48 is a constant
+regardless of project size.
+
+So topic 3 is not "stop RAM scaling with nodes" — that holds today. It is stop
+paying a fixed 33 KB for a node set that never changes, and stop allocating
+structures whose sizes are known at compile time.
+
+### A note on attribution, so the numbers are not misread
+
+It is fair to call the current split a design mistake: library code belongs in
+the library, and several allocations should always have been static. But the
+measurements do not support blaming the footprint on it. **42% of the peak is
+upstream's namespace zero**, which no structuring choice on our side would have
+avoided, and the allocation style in our `/arch` code is upstream's own house
+style — `arch/posix`, `arch/lwip` and `arch/zephyr` all malloc their state too.
+Restructuring is worth doing on its own merits; it is not by itself what makes
+the arena 64 KB.
 
 ## Method
 
@@ -123,8 +159,7 @@ superloop. Writing our own connection manager was forced, not a shortcut.
 The right port for this repo is not lwIP anyway: it is **Arduino**. This repo
 ships an Arduino library, so its `/arch` layer should target the Arduino
 network API and work on any core — lwIP, WIZnet shield, ESP32 WiFi or
-otherwise — rather than any one stack underneath it. See the parallel
-workstream in the plan below.
+otherwise — rather than any one stack underneath it. See topic 1 in the plan below.
 
 Bucketing the 44,816-byte peak by layer rather than by authorship:
 
@@ -264,7 +299,7 @@ open62541 need" but by a formula over the project's own settings.
    consumers are static, what remains scales with declared settings:
    `arena = base + sessions x 1,032 + request_scratch`, where the VPP declares
    a maximum. This becomes tractable only once the large fixed consumers are
-   gone, which is why it is last.
+   gone, which is why it is topic 3d.
 6. **Should we pivot to another OPC-UA stack or an existing fork?** **No.** The
    fork we would be looking for is upstream v1.5.8 itself: the ROM-nodestore
    seam is already there. Pivoting would discard a working, hardware-validated,
@@ -272,74 +307,14 @@ open62541 need" but by a formula over the project's own settings.
 
 ## Implementation plan
 
-The library question comes first. The flash-resident nodestore is the only part
-of this card with genuine unknowns, it is the largest single line item, and it
-is what determines what the arena can eventually become — so it leads, and
-everything else is sized around what it turns out to allow.
+### Topic 1 — make this repo a properly hardware-abstracted Arduino library
 
-An earlier draft of this plan opened with the cheap platform-layer statics
-instead. That was ordering by cost rather than by uncertainty: those statics
-de-risk nothing for the nodestore, and one of them (the `FlashNodestore` pool)
-lives in the very file the nodestore work rewrites, so doing it first would
-have been work done twice.
+The goal is that a sketch on any core can `#include` this library and use it,
+with the OpenPLC runtime as one sketch among others rather than a special case.
 
-### Phase 1 — flash-resident namespace zero (this repo)
-
-1. Add `UA_NAMESPACE_ZERO=NONE` as a generator option in
-   `tools/arduino/generate-arduino-library.sh`, producing a second library
-   variant. Keep MINIMAL as the default until this phase is proven.
-2. Write a host-side generator that builds a MINIMAL server, walks the
-   nodestore after `run_startup`, and emits a `const` ns0 table (nodes,
-   references, locales, browse names) plus an index. The host build being the
-   source of truth is what keeps the table honest across upstream bumps.
-3. Rewrite the flash nodestore to serve ns0 from that table and drop the inner
-   RAM store. It is allocated statically from the start — the 1,680-byte pool
-   is part of this phase, not a separate one.
-4. Confirm `initNS0_dataSources()` binds every dynamic callback it expects.
-
-- Expected: −18,992 static (ns0) −1,680 (pool) = **−20,672**.
-- Risk: medium, and concentrated here. Everything unknown about this card is
-  in step 2 and step 3.
-- Verify: browse the full address space from a reference client and diff
-  against the MINIMAL build's — they must be identical.
-
-### Phase 2 — replace the fixed arena with a computed one
-
-What Phase 1 leaves behind decides this, which is why it cannot be planned in
-detail yet. Derive the arena size from declared project settings, have the VPP
-declare a *maximum* rather than a fixed size, and keep the exhaustion counter
-so overruns stay observable rather than silent.
-
-### Parallel workstream — the Arduino `/arch` port belongs in this repo
-
-This repo packages open62541 as an **Arduino library**. An Arduino library is
-expected to work against the Arduino network API, so that any sketch on any
-core can `#include` it and go — and the OpenPLC baremetal runtime is then just
-one sketch among others rather than a special case. That means the `/arch`
-port is this repo's deliverable, not the integrator's.
-
-An earlier revision of this doc argued the opposite, on the grounds that a
-board-coupled connection manager would tax every rebase onto upstream. That
-was wrong twice over. Upstream's own convention is `arch/<name>/`, so an
-`arch/arduino/` is new files in a new directory that conflict with nothing.
-And the connection manager is not board-coupled: `opcua_arch_tcp.cpp` is 436
-lines with **zero** board macros, because it is already typed on Arduino's
-abstract `Client`. Of the 1,425 lines of arch and net code in the runtime
-today, the only file that names a board is `baremetal_net.h` — 10 references
-in 258 lines — and it names them for exactly one reason, below.
-
-(Upstream's porting guide also directs ports to edit
-`plugins/ua_config_default.c`. We avoid touching it by shipping our own
-`UA_ServerConfig_setDefault_Arduino()`, keeping the delta to added files.)
-
-#### The obstacle is in Arduino, not in us
-
-`Client` is a real abstraction — eleven pure virtuals covering `connect`,
-`read`, `write`, `available`, `peek`, `flush`, `stop`, `connected` and
-`operator bool`. Any `EthernetClient` or `WiFiClient` is usable as a `Client&`.
-
-`Server` is not an abstraction at all. Verified identical across seven cores
-including the official ArduinoCore-API:
+**The obstacle is in Arduino, not in open62541.** `Client` is a real
+abstraction — eleven pure virtuals. `Server` is not one at all; verified
+identical across seven cores including the official ArduinoCore-API:
 
 ```cpp
 class Server : public Print {
@@ -350,74 +325,148 @@ class Server : public Print {
 
 There is no portable accept. `EthernetServer::available()` returns an
 `EthernetClient` **by value**; `WiFiServer::available()` returns a `WiFiClient`
-by value; neither overrides anything. So a *client*-side protocol can be
-written once against `Client&` and run everywhere, and a *server*-side one
-cannot. That asymmetry is the whole reason `baremetal_net.h` carries a board
-table and a hard `#error`: it is supplying the missing half of the Arduino
-network API.
+by value; neither overrides anything. So client-side protocols port for free
+and server-side ones cannot.
 
-#### The seam
+**How other libraries solve it.** Surveyed eight, five distinct strategies:
 
-The library defines the interface and never names a board:
+| strategy | libraries | portability |
+|----------|-----------|-------------|
+| **A. Refuse to own the listener** — take `Client&`, sketch accepts | **ArduinoModbus** (Arduino SA's own), **aWOT**, **our Settimino fork** | every core, zero board macros |
+| B. Template on `ServerType` | ESP8266WebServer, rp2040 WebServer | needs `ServerType::ClientType`; esp8266 had to add it to their own `WiFiServer` |
+| C. Replace Arduino's abstraction in the core | ESP32 `WebServer` via `NetworkServer`/`NetworkClient` | within that core only |
+| D. Enumerate every board | khoih-prog EthernetWebServer — 43 board macros in one header | many boards, by brute force |
+| E. Bypass Arduino entirely | ESPAsyncWebServer (AsyncTCP over raw lwIP) | ESP32/ESP8266 only |
+| F. Two-way `#ifdef` | Espalexa | 2 platforms |
+
+**We take strategy A**, which is what Arduino themselves chose for their own
+server library. `ModbusTCPServer` in full:
 
 ```cpp
-class UA_ArduinoListener {
-public:
-    virtual ~UA_ArduinoListener() {}
-    virtual void    begin()  = 0;
-    virtual Client* accept() = 0;   // nullptr when nothing is pending
+#include <Client.h>                     // note: NOT <Server.h>
+class ModbusTCPServer : public ModbusServer {
+  void accept(Client& client);
+  int  poll();
+private:
+  Client* _client;
 };
-
-template <class ServerT, class ClientT>
-class UA_ArduinoListenerFor : public UA_ArduinoListener { /* ~15 lines */ };
 ```
 
-plus `__has_include`-guarded typedefs for the cores people actually use
-(`Ethernet.h`, `WiFi.h`, `WiFiS3.h`, `ETH.h`). Common core: include, one
-typedef, done. Exotic core: implement two methods. An unrecognised board stops
-being a compile-time `#error` in someone else's board table and becomes a
-fifteen-line adapter in the sketch.
+The sketch owns the listener and does the accepting. aWOT is identical
+(`Application::process(Client*)`, zero board macros, never includes
+`<Server.h>`), and our own Settimino fork already does the strongest form of
+it — `S7Server.h` includes only `<stdint.h>` and `<stddef.h>` and takes
+complete frames, so it runs against any transport or none.
 
-OpenPLC then keeps its shared slot pool by implementing that same interface
-over it. That is the right split: "OPC-UA and S7Comm share one budget" is a
-resource-policy decision belonging to the application, not to either library.
+Strategies D and E are the warnings. D is the shape of today's
+`baremetal_net.h` and of the `modbus_tcp.cpp` fall-through that already
+produced three live defects. E buys a nicer API by giving up every core but
+one.
 
-#### Why this is the same work as the RAM reduction
+So the library's entire public networking surface becomes:
 
-Moving the connection manager into the library is exactly the moment to make
-its receive and send buffers static, because a library sizing them from a
-compile-time constant is better design than a sketch mallocing them. So the
-`/arch` allocations — `ArduinoTcpCM` 8,416, `UA_EventLoop_new_Arduino` 1,272,
-and the 8,240-byte send buffer — come off the arena as a side effect of
-packaging the library properly.
+```cpp
+UA_StatusCode opcua_accept(Client& client);
+```
 
-- Expected: −9,688 static, −8,240 peak.
-- Risk: low on the RAM side, moderate on the API side — the listener interface
-  is a public API and wants to be right the first time.
-- Independent of Phase 1: different files, no shared decisions. Can run in
-  parallel.
+This is feasible without fighting open62541: `cm_open` already treats the
+listener as a fiction — `kListenerId = BM_NET_OPCUA_SLOTS + 1` exists purely to
+satisfy the EventLoop's model while the real accept happens in
+`bm_net::Listener`. Dropping `Listener::begin()` in favour of injected clients
+is a change confined to our own connection manager.
 
-### Remaining one-shot config structures
+An optional convenience adapter (a `template<class ServerT, class ClientT>`
+listener plus `__has_include` typedefs for the common cores) can ship *on top*
+of that API for users who want one-line setup. It must never be the interface
+itself — that distinction is exactly what separates aWOT from khoih-prog.
 
-`UA_Server_newWithConfig` (1,064), `UA_ServerConfig_addSecurityPolicyNone`
-(624) and a tail of small strings — ~3,048 bytes. These would need upstream
-changes for diminishing returns. Evaluate after Phase 1, do not assume.
+Deliverables:
+
+1. `arch/arduino/` — clock and EventLoop, following upstream's `arch/<name>/`
+   convention so the delta over upstream stays additive. (Upstream's porting
+   guide also directs ports to edit `plugins/ua_config_default.c`; we avoid
+   touching it by shipping our own `UA_ServerConfig_setDefault_Arduino()`.)
+2. The `Client&` accept API, with no `<Server.h>` include and no board macro
+   anywhere in the library.
+3. The optional listener adapter and typedefs.
+4. An example sketch that is not OpenPLC, to prove the library stands alone.
+
+### Topic 2 — move open62541 code out of the baremetal runtime
+
+Everything in the editor's `resources/sources/Baremetal/` that is not
+application code moves into this library:
+
+| file | lines | destination |
+|------|------:|-------------|
+| `opcua_arch_tcp.cpp` | 436 | library `/arch` — already 0 board macros |
+| `opcua_arch.cpp` | 449 | library `/arch` (EventLoop, clock) |
+| `opcua_arch.h` | 36 | library `/arch` |
+| `opcua_nodestore.cpp` | — | library `/plugins` |
+| `opcua_arena.cpp/.h` | — | library (the `UA_malloc` singleton backing) |
+| `baremetal_net.*` | 504 | **stays** — becomes the sketch's accept loop |
+
+What stays in the runtime is application code only: `opcua_nodes.cpp` (mapping
+located PLC variables onto nodes) and `opcua_server.cpp` (init, and driving
+`UA_Server_run_iterate` from the scan cycle). `baremetal_net.h` keeps its board
+table, which is correct — picking `EthernetServer` vs `WiFiServer` for *this
+product* is a product decision, and under strategy A it is the sketch's job.
+
+This also resolves the OPC-UA/S7Comm shared slot pool cleanly: the sketch owns
+the accept loop for both, so "one pool, two protocols" stops being something
+two libraries have to cooperate on.
+
+Acceptance: the library builds and runs from a non-OpenPLC sketch; the runtime
+contains no `UA_*` platform implementation; both repos' CI green.
+
+### Topic 3 — optimise, so RAM is decoupled from node count
+
+Only once topics 1 and 2 have settled where the code lives.
+
+**3a. Flash-resident namespace zero.** `UA_NAMESPACE_ZERO=NONE` is already a
+first-class upstream configuration (finding 3) — `initNS0_dataSources()` is
+public and documented for external ROM nodestores, and a NONE amalgamation
+builds cleanly with our option set. Add the generator variant, write a
+host-side generator that builds a MINIMAL server and emits its nodestore as a
+`const` table, and rewrite the nodestore to serve ns0 from it with no inner RAM
+store. Statically allocated from the start.
+**−18,992 (ns0) −1,680 (pool) = −20,672.** This is where the unknowns are.
+
+**3b. Static `/arch` structures.** Having moved into the library, size the
+receive buffer, the EventLoop and the send buffer from compile-time constants
+rather than allocating them. **−9,688 static, −8,240 peak.**
+
+**3c. Remaining one-shot config.** `UA_Server_newWithConfig` (1,064),
+`UA_ServerConfig_addSecurityPolicyNone` (624) and a tail of strings, ~3,048
+bytes. Needs upstream changes for diminishing returns — evaluate, do not
+assume.
+
+**3d. Computed arena.** What 3a–3c leave decides this. Derive the size from
+declared project settings, have the VPP declare a *maximum* rather than a fixed
+size, and keep the exhaustion counter so overruns stay observable.
 
 ### Projected outcome
+
+Topics 1 and 2 move code without changing footprint. Topic 3 is where the
+bytes come off:
 
 | | static | peak |
 |---|---:|---:|
 | today | 33,408 | 44,816 |
-| after Phase 1 (flash ns0) | 12,736 | 23,112 |
-| + platform-layer statics | 3,048 | 6,216 |
-| + config structures (optimistic) | ~1,360 | ~4,528 |
+| after 3a (flash ns0) | 12,736 | 23,112 |
+| after 3b (static `/arch`) | 3,048 | 6,216 |
+| after 3c (optimistic) | ~1,360 | ~4,528 |
 
 An arena of **8 KB instead of 64 KB**, returning ~56 KB of a 248 KB part —
 before counting what a smaller `sendBufferSize` would buy on projects that do
 not need the full 8,192-byte chunk.
 
-Phase 1 alone takes the peak below 24 KB, which is already enough to justify
-cutting the arena to 32 KB before anything else lands.
+3a alone takes the peak below 24 KB, which already justifies cutting the arena
+to 32 KB before anything else lands.
+
+And the end state satisfies the objective: with ns0 in flash and `/arch`
+structures static, what remains in the arena is per-session state (~1,032
+bytes) and per-request scratch. Neither scales with the number of nodes —
+which, for project nodes, is already true today.
 
 ## Notes for whoever picks this up
 
