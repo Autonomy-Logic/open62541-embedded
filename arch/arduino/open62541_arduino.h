@@ -203,6 +203,75 @@ void UA_Arduino_setDiscoveryAddress(const char* host);
 void UA_Arduino_setTime(int64_t unixSeconds);
 
 /* -------------------------------------------------------------------------
+ * Flash-resident nodestore
+ *
+ * An embedded server's address space is fixed when the sketch is compiled, so
+ * keeping it in RAM pays per node for something already `const` in flash.
+ * Measured on a Cortex-M4 against open62541's default zip-tree nodestore:
+ * 476 bytes of heap per node, and a Browse failing with BadOutOfMemory at 40
+ * nodes. With this, what stays in RAM is 8 bytes of parent reference per node.
+ *
+ * Supply the callbacks below over whatever `const` table your build generates.
+ * The nodestore wraps the default one, so anything outside your namespace --
+ * namespace zero especially -- is delegated untouched.
+ * ------------------------------------------------------------------------- */
+
+/** Simultaneously materialised nodes.
+ *
+ *  Bounded by the OperationLimits: a Read walks its nodes one at a time, a
+ *  Browse holds the browsed node plus what it is looking at. Deliberately
+ *  small, and exhaustion is counted rather than tolerated, so a pool that is
+ *  too small shows up in test instead of in the field. */
+#ifndef UA_ARDUINO_NODE_POOL_SLOTS
+#define UA_ARDUINO_NODE_POOL_SLOTS 8
+#endif
+
+typedef struct {
+    /** Fill `out` with the node having this numeric id in namespace `ns`.
+     *  Return false if there is no such node -- that is a normal answer, not
+     *  an error. Anything allocated here is released by dematerialise. */
+    bool (*materialise)(UA_UInt16 ns, UA_UInt32 numericId,
+                        UA_VariableNode* out, void* context);
+
+    /** Release whatever materialise() allocated (typically reference arrays).
+     *  The node storage itself belongs to the pool and is not yours. */
+    void (*dematerialise)(UA_VariableNode* node, void* context);
+
+    /** Optional: how many nodes you have, and the id of the i-th.
+     *
+     *  Used only to let the server walk the whole address space. Leave both
+     *  NULL if enumeration is inconvenient; clients are unaffected, since they
+     *  reach nodes by id and through references. */
+    UA_UInt16 (*count)(void* context);
+    UA_UInt32 (*idAt)(UA_UInt16 index, void* context);
+
+    /** The namespace these nodes live in. Everything else is delegated. */
+    UA_UInt16 namespaceIndex;
+
+    void* context;
+} UA_Arduino_FlashNodeSource;
+
+/** Wrap `inner` so that nodes in `source->namespaceIndex` come from flash.
+ *
+ *  Takes ownership of `inner`: freeing the returned nodestore frees it too,
+ *  which is what open62541 does on shutdown. Returns NULL if the source is
+ *  incomplete or the pool cannot be allocated, in which case keep using
+ *  `inner` alone rather than run with no address space. `logger` may be NULL.
+ *
+ *  Install it before UA_Server_new():
+ *
+ *      UA_ServerConfig *cfg = ...;
+ *      cfg->nodestore = *UA_Nodestore_newFlash(&source, cfg->nodestore, cfg->logging);
+ */
+UA_Nodestore* UA_Nodestore_newFlash(const UA_Arduino_FlashNodeSource* source,
+                                    UA_Nodestore* inner,
+                                    const UA_Logger* logger);
+
+/** Peak simultaneous materialised nodes, and how many times the pool was
+ *  exhausted. `exhausted` must be zero in a healthy build. */
+void UA_Arduino_getNodestoreStats(uint16_t* outHighWater, uint32_t* outExhausted);
+
+/* -------------------------------------------------------------------------
  * Bounded allocator
  *
  * open62541 calls UA_malloc on paths a server cannot avoid -- session setup,
