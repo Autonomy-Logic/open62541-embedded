@@ -89,10 +89,22 @@
  *  arena note below for why a macro could not reach this library anyway. */
 #define UA_ARDUINO_DEFAULT_MAX_CONNECTIONS 4
 
-/** 8192 is a protocol floor, not a preference: OPC-UA Part 6 6.7.1 requires a
- *  SecureChannel to accept an 8192-byte chunk, and open62541 enforces it.
- *  Going below it makes the server reject conformant clients. */
+/** Transfer buffer for one read() -- NOT the protocol's 8192 floor.
+ *
+ *  That floor is what the server must ACCEPT, advertised through the config's
+ *  tcpBufSize in the Hello/Ack. This buffer only carries bytes from the socket
+ *  into open62541, which accumulates a message spanning several reads into its
+ *  own SecureChannel buffer. Most requests are a few hundred bytes, so a
+ *  resident 8 KB is paying constantly for the rare large one.
+ *
+ *  8192 stays the default because it is the least surprising; constrained
+ *  targets should set it far lower via UA_Arduino_configureTcp(). */
 #define UA_ARDUINO_DEFAULT_RECV_BUFFER 8192
+
+/** Below this a read is too small to be worth the call overhead, and a
+ *  pathological setting (say 8 bytes) would turn every message into dozens of
+ *  reallocs inside the SecureChannel. */
+#define UA_ARDUINO_MIN_RECV_BUFFER 256
 
 /** Repeated callbacks the EventLoop can hold.
  *

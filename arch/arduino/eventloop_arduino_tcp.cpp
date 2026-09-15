@@ -360,8 +360,8 @@ UA_ConnectionManager_new_Arduino_TCP(const UA_String eventSourceName)
                                                    : UA_ARDUINO_DEFAULT_MAX_CONNECTIONS;
     size_t recvSize = (g_cfg_recv_size > 0) ? g_cfg_recv_size
                                             : (size_t)UA_ARDUINO_DEFAULT_RECV_BUFFER;
-    if (recvSize < (size_t)UA_ARDUINO_DEFAULT_RECV_BUFFER)
-        recvSize = (size_t)UA_ARDUINO_DEFAULT_RECV_BUFFER;   // protocol floor
+    if (recvSize < UA_ARDUINO_MIN_RECV_BUFFER)
+        recvSize = UA_ARDUINO_MIN_RECV_BUFFER;
 
     const size_t total = sizeof(ArduinoTcpCM) + (size_t)maxConns * sizeof(Conn) + recvSize;
     ArduinoTcpCM* m = (ArduinoTcpCM*)UA_calloc(1, total);
@@ -471,11 +471,18 @@ extern "C" void UA_Arduino_configureTcp(uint8_t maxConnections, size_t recvBuffe
         g_cfg_max_conns = maxConnections;
     if (recvBufferSize > 0)
     {
-        // Clamp rather than honour: below the Part 6 6.7.1 floor the server
-        // rejects conformant clients, which looks like a broken server rather
-        // than a misconfigured one.
-        g_cfg_recv_size = (recvBufferSize < (size_t)UA_ARDUINO_DEFAULT_RECV_BUFFER)
-                              ? (size_t)UA_ARDUINO_DEFAULT_RECV_BUFFER
+        // Clamped only to a sane minimum, NOT to the 8192 protocol floor.
+        //
+        // That floor is what the server must ACCEPT, and it is advertised
+        // through the config's tcpBufSize in the Hello/Ack -- it is not the
+        // size of this transfer buffer. open62541 accumulates a message that
+        // spans several reads into its own SecureChannel buffer
+        // (UA_SecureChannel_loadBuffer reallocs and appends), so this only has
+        // to be big enough for one read() to be worthwhile. Most requests are
+        // a few hundred bytes; paying 8 KB of resident RAM for the rare large
+        // one is what this exists to avoid.
+        g_cfg_recv_size = (recvBufferSize < UA_ARDUINO_MIN_RECV_BUFFER)
+                              ? (size_t)UA_ARDUINO_MIN_RECV_BUFFER
                               : recvBufferSize;
     }
 }

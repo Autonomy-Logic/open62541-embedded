@@ -21,8 +21,12 @@
 UA_ArduinoListener<EthernetServer, EthernetClient> listener(4840);
 
 byte      mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
-IPAddress ip(192, 168, 1, 50);
+IPAddress ip(192, 168, 2, 60);
 
+/* Measured on hardware: 7,800 bytes at rest, 19,296 at peak with one client
+ * connected. 24 KB leaves room for fragmentation; below ~20 KB the handshake
+ * fails with BadOutOfMemory, because a session needs the 8 KB response chunk
+ * on top of everything resident. */
 static uint8_t opcuaArena[24 * 1024];
 UA_Server *server = nullptr;
 
@@ -35,10 +39,10 @@ void setup() {
     Serial.begin(115200);
     Ethernet.begin(mac, ip);
     listener.begin();
-    UA_Arduino_setDiscoveryAddress("192.168.1.50");
+    UA_Arduino_setDiscoveryAddress("192.168.2.60");
 
     UA_Arduino_setArena(opcuaArena, sizeof(opcuaArena));
-    UA_Arduino_configureTcp(2, 8192);
+    UA_Arduino_configureTcp(1, 1024);
 
     UA_ServerConfig config;
     memset(&config, 0, sizeof(config));
@@ -67,6 +71,7 @@ void setup() {
 
     UA_Arduino_ArenaStats st;
     UA_Arduino_getArenaStats(&st);
+    Serial.print("IP: "); Serial.println(Ethernet.localIP());
     Serial.print("arena in use after startup: ");
     Serial.print((unsigned long)st.inUse);
     Serial.print(" of "); Serial.println((unsigned long)st.size);
