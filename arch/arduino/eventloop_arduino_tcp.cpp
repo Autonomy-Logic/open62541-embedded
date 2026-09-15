@@ -85,20 +85,14 @@ void drop(ArduinoTcpCM* m, uint8_t idx)
     if (c.client == nullptr)
         return;
 
-    // Tell open62541 first, while the id is still resolvable, so it can
-    // release its SecureChannel before the slot is reused.
+    // Tell open62541 first, while the id is still resolvable, so it can release
+    // its SecureChannel before the slot is reused.
     //
-    // BUT only if the server actually took ownership of this connection. An
-    // accepted client starts out carrying the LISTENER's context -- that is
-    // how open62541 recognises a new arrival on its own server socket -- and
-    // the server replaces it with a SecureChannel on the first callback. If
-    // the peer went away before that happened, the context is still the
-    // listener's UA_ServerConnection, and reporting CLOSING with it makes the
-    // server believe its LISTENING SOCKET closed: it zeroes the connectionId
-    // and decrements serverConnectionsSize, after which the next client
-    // cannot be given a SecureChannel and gets BadInternalError at Hello.
-    // Observed on hardware as perfectly alternating ACK / ERR responses to
-    // identical UA-TCP Hellos.
+    // Only if the server actually took ownership of this connection. An accepted
+    // client starts out carrying the LISTENER's context, and the server replaces
+    // it with a SecureChannel on the first callback. Reporting CLOSING with the
+    // listener's context makes the server believe its listening socket closed,
+    // after which the next client gets BadInternalError at Hello.
     //
     // Nothing leaks by staying quiet: if no channel was created, there is
     // nothing for the server to release.
@@ -471,16 +465,11 @@ extern "C" void UA_Arduino_configureTcp(uint8_t maxConnections, size_t recvBuffe
         g_cfg_max_conns = maxConnections;
     if (recvBufferSize > 0)
     {
-        // Clamped only to a sane minimum, NOT to the 8192 protocol floor.
-        //
-        // That floor is what the server must ACCEPT, and it is advertised
-        // through the config's tcpBufSize in the Hello/Ack -- it is not the
-        // size of this transfer buffer. open62541 accumulates a message that
-        // spans several reads into its own SecureChannel buffer
-        // (UA_SecureChannel_loadBuffer reallocs and appends), so this only has
-        // to be big enough for one read() to be worthwhile. Most requests are
-        // a few hundred bytes; paying 8 KB of resident RAM for the rare large
-        // one is what this exists to avoid.
+        // Clamped only to a sane minimum, NOT to the 8192 protocol floor. That
+        // floor is what the server must ACCEPT and is advertised through the
+        // config's tcpBufSize; it is not the size of this transfer buffer.
+        // open62541 accumulates a multi-read message into its own SecureChannel
+        // buffer, so this only has to make one read() worthwhile.
         g_cfg_recv_size = (recvBufferSize < UA_ARDUINO_MIN_RECV_BUFFER)
                               ? (size_t)UA_ARDUINO_MIN_RECV_BUFFER
                               : recvBufferSize;

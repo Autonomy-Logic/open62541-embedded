@@ -9,16 +9,9 @@
  * ns0-census -- walk a MINIMAL server's namespace zero and report what a
  * flash-resident version would have to supply.
  *
- * A HOST tool, and the first step of making namespace zero const: before
- * generating a table you have to know what is in there, and the only
- * trustworthy source is a real server after run_startup rather than a reading
- * of the nodeset XML.
- *
- * Measured on v1.5.8 with the Arduino option set: 48 nodes, 142 reference
- * targets, 48 locale entries, 1,138 bytes of names and 24 bytes of values.
- * Those 48 nodes cost 18,992 bytes of heap on a Cortex-M4 -- roughly 19 KB of
- * RAM holding 1.2 KB of content that is identical on every device and every
- * boot.
+ * A host tool, and the first step of making namespace zero const: the only
+ * trustworthy source is a real server after run_startup rather than a reading of
+ * the nodeset XML.
  *
  * Build (from the repo root, against a host build of the library):
  *

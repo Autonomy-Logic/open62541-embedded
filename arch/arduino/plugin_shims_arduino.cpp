@@ -10,14 +10,11 @@
  * unconditionally, even under UA_ARCHITECTURE=none.
  *
  * Upstream's porting guide offers two ways out: rename your implementations to
- * match, or stop using UA_ServerConfig_setMinimal and assemble the config by
- * hand. We take the first, because the second means duplicating a few hundred
- * lines of upstream config setup that would then need re-checking on every
- * version bump.
- *
- * So the implementations are honestly named *_Arduino, and the three lies live
- * here, contained, rather than spreading a platform name that is wrong through
- * the files that do the work.
+ * match, or assemble the config by hand instead of using
+ * UA_ServerConfig_setMinimal. We take the first, because the second duplicates a
+ * few hundred lines of upstream config setup that would need re-checking on
+ * every version bump. The implementations are named *_Arduino and the aliases
+ * are contained here.
  */
 
 #include "arduino_internal.h"

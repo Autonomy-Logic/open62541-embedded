@@ -93,12 +93,10 @@
  *
  *  That floor is what the server must ACCEPT, advertised through the config's
  *  tcpBufSize in the Hello/Ack. This buffer only carries bytes from the socket
- *  into open62541, which accumulates a message spanning several reads into its
- *  own SecureChannel buffer. Most requests are a few hundred bytes, so a
- *  resident 8 KB is paying constantly for the rare large one.
- *
- *  8192 stays the default because it is the least surprising; constrained
- *  targets should set it far lower via UA_Arduino_configureTcp(). */
+ *  into open62541, which accumulates a multi-read message into its own
+ *  SecureChannel buffer. 8192 stays the default because it is the least
+ *  surprising; constrained targets should set it far lower via
+ *  UA_Arduino_configureTcp(). */
 #define UA_ARDUINO_DEFAULT_RECV_BUFFER 8192
 
 /** Below this a read is too small to be worth the call overhead, and a
@@ -108,17 +106,14 @@
 
 /** Repeated callbacks the EventLoop can hold.
  *
- *  open62541 registers several of its own -- SecureChannel housekeeping,
- *  session timeouts -- and more arrive as features are enabled. Too small is
- *  not a soft limit: addTimer returns BADOUTOFMEMORY, the server carries on
- *  believing the callback is scheduled, and the work silently never happens.
- *  SecureChannel housekeeping is the one that must not be dropped: without it
- *  closed channels are never reaped and the next client is refused.
+ *  open62541 registers several of its own -- SecureChannel housekeeping, session
+ *  timeouts -- and more arrive as features are enabled. Too small is not a soft
+ *  limit: addTimer returns BADOUTOFMEMORY and the work silently never happens.
+ *  SecureChannel housekeeping is the one that must not be dropped, or closed
+ *  channels are never reaped and the next client is refused.
  *
- *  Measured on hardware with a client connected: 2 are ever live at once. 24
- *  was a guess made before there was anything to measure, and every unused
- *  slot is 44 bytes of the EventLoop's allocation. 6 keeps triple the observed
- *  need. Raise it if a build enables features that register more. */
+ *  Every unused slot costs 44 bytes of the EventLoop's allocation. Raise it if a
+ *  build enables features that register more. */
 #ifndef UA_ARDUINO_MAX_TIMERS
 #define UA_ARDUINO_MAX_TIMERS 6
 #endif
@@ -229,28 +224,19 @@ void UA_Arduino_setTime(int64_t unixSeconds);
  * Flash-resident nodestore
  *
  * An embedded server's address space is fixed when the sketch is compiled, so
- * keeping it in RAM pays per node for something already `const` in flash.
- * Measured on a Cortex-M4 against open62541's default zip-tree nodestore:
- * 476 bytes of heap per node, and a Browse failing with BadOutOfMemory at 40
- * nodes. With this, what stays in RAM is 8 bytes of parent reference per node.
- *
- * Supply the callbacks below over whatever `const` table your build generates.
- * The nodestore wraps the default one, so anything outside your namespace --
- * namespace zero especially -- is delegated untouched.
+ * keeping it in RAM pays per node for something already `const` in flash. What
+ * stays in RAM is 8 bytes of parent reference per node. Supply the callbacks
+ * below over whatever `const` table your build generates; the nodestore wraps
+ * the default one, so anything outside your namespace is delegated untouched.
  * ------------------------------------------------------------------------- */
 
-/** Default simultaneously-materialised nodes; UA_Nodestore_newFlash() takes
- *  the real value.
+/** Default simultaneously-materialised nodes; UA_Nodestore_newFlash() takes the
+ *  real value.
  *
- *  Bounded by the OperationLimits: a Read walks its nodes one at a time, a
- *  Browse holds the browsed node plus what it is looking at. Deliberately
- *  small, and exhaustion is counted rather than tolerated, so a pool that is
- *  too small shows up in test instead of in the field.
- *
- *  Measured on hardware: high-water 1. A Read walks its nodes one at a time
- *  and releases each before taking the next, so the depth is far lower than
- *  the operation limits suggest. 4 is the default; the caller passes the real
- *  value. */
+ *  Bounded by the OperationLimits: a Read walks its nodes one at a time and
+ *  releases each before taking the next, and a Browse holds the browsed node
+ *  plus what it is looking at. Exhaustion is counted rather than tolerated, so a
+ *  pool that is too small shows up in test instead of in the field. */
 #define UA_ARDUINO_DEFAULT_NODE_POOL_SLOTS 4
 
 typedef struct {

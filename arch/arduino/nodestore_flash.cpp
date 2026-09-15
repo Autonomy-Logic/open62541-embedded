@@ -9,31 +9,19 @@
  * A read-only nodestore that keeps nodes in flash and materialises them on
  * demand into a small fixed pool.
  *
- * An embedded server's address space is decided when the sketch is compiled
- * and never changes at runtime. Keeping it in RAM therefore pays, per node,
- * for something that is already `const` in flash. Measured on a Cortex-M4
- * against open62541's default zip-tree nodestore:
+ * An embedded server's address space is decided when the sketch is compiled and
+ * never changes, so keeping it in RAM pays per node for something already
+ * `const`. Against the default zip-tree nodestore this cost ~476 B/node, and a
+ * Browse over 40 nodes then failed with BadOutOfMemory. What remains in RAM is
+ * the parent folder's forward references, 8 bytes per node.
  *
- *      2 nodes    30,840 -> 32,248 bytes of heap
- *     40 nodes    30,840 -> 49,872 bytes          =  476 B/node
+ * It WRAPS rather than replaces the default nodestore: namespace zero is large,
+ * mutable during startup and not yours, so anything outside your namespace is
+ * delegated untouched.
  *
- * and at 40 nodes a Browse then failed outright with BadOutOfMemory: 49,872 of
- * a 65,536-byte arena was gone, the largest free block was 13,440 bytes, and
- * there was nowhere left to build the response. So this is not a tuning
- * exercise. Without it a constrained server cannot serve a realistic address
- * space at all.
- *
- * What remains in RAM is the parent folder's forward references, 8 bytes per
- * node, instead of 476.
- *
- * It WRAPS rather than replaces the default nodestore. Namespace zero is
- * large, mutable during startup and not yours, so anything outside your
- * namespace is delegated untouched. (Making namespace zero itself flash-
- * resident is a separate and larger piece of work.)
- *
- * You supply the two callbacks in UA_Arduino_FlashNodeSource: one to fill a
- * node from whatever `const` table your build generated, one to release
- * whatever that allocated. Everything else here is generic.
+ * You supply the two callbacks in UA_Arduino_FlashNodeSource: one to fill a node
+ * from whatever `const` table your build generated, one to release what that
+ * allocated. Everything else here is generic.
  */
 
 
@@ -49,12 +37,9 @@ namespace {
 #ifdef UA_ARDUINO_NS0_FLASH
 
 // ---------------------------------------------------------------------------
-// Namespace zero, served from flash
-//
-// The 48 ns0 nodes are const (see ua_ns0_flash.c) and cost no RAM. Two of them
-// are written during run_startup -- ServerArray and NamespaceArray, whose
-// values are device-specific strings -- so those get a writable copy here and
-// everything else is handed out as a pointer into flash.
+// Namespace zero, served from flash. The 48 ns0 nodes are const (see
+// ua_ns0_flash.c) and cost no RAM. Two of them are written during run_startup
+// -- ServerArray and NamespaceArray -- so those get a writable copy here.
 // ---------------------------------------------------------------------------
 
 struct Ns0Overlay
@@ -340,16 +325,12 @@ UA_Node* ns_getEditNode(UA_Nodestore* ns, const UA_NodeId* nodeId,
     FlashNodestoreImpl* m = self(ns);
     if (is_ours(m, nodeId))
     {
-        // Hand back a MATERIALISED copy, not nullptr.
-        //
-        // Flash is the truth and any edit is discarded when the node is
-        // released -- but refusing outright breaks callers that legitimately
-        // need a writable node in hand. UA_Server_addReference is the case
-        // that matters: it edits the source to add the forward reference and
-        // the TARGET to add the inverse, and a target it cannot edit fails the
-        // whole call with BadTargetNodeIdInvalid. The inverse it wants is
-        // already in the flash node, so letting the write land on a throwaway
-        // copy costs nothing and keeps the reference wiring working.
+        // Hand back a MATERIALISED copy, not nullptr. Flash is the truth and any
+        // edit is discarded on release, but refusing outright breaks callers that
+        // legitimately need a writable node: UA_Server_addReference edits the
+        // target to add the inverse reference and fails the whole call with
+        // BadTargetNodeIdInvalid otherwise. That inverse is already in the flash
+        // node, so letting the write land on a throwaway copy costs nothing.
         return const_cast<UA_Node*>(materialise(m, nodeId->identifier.numeric));
     }
     if (m->ns0_flash && is_ns0(nodeId))

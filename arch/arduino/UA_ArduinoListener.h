@@ -11,38 +11,18 @@
  * It owns a listening server, a pool of client slots, and wires up the two
  * callbacks, so the common case is one declaration and two calls:
  *
- *     #include <open62541_arduino.h>
- *     #include <UA_ArduinoListener.h>
- *     #include <Ethernet.h>
- *
  *     UA_ArduinoListener<EthernetServer, EthernetClient> listener(4840);
+ *     void setup() { Ethernet.begin(mac, ip); listener.begin(); }
+ *     void loop()  { listener.poll(); UA_Server_run_iterate(server, false); }
  *
- *     void setup() {
- *         Ethernet.begin(mac, ip);
- *         listener.begin();
- *         ...
- *     }
- *     void loop() {
- *         listener.poll();
- *         UA_Server_run_iterate(server, false);
- *     }
+ * This sits ON TOP of the Client& API, never underneath it, so a board this
+ * template does not suit still works: the sketch can call
+ * UA_Arduino_acceptClient() with clients from anywhere.
  *
- * This sits ON TOP of the Client& API, never underneath it. That ordering is
- * the whole point: a board this template does not suit still works, because
- * the sketch can call UA_Arduino_acceptClient() with clients from anywhere.
- * Libraries that put the board abstraction underneath instead end up with a
- * list of supported boards and a hard error for everything else.
- *
- * WHAT IT SOLVES
- * --------------
- * Client lifetime. `EthernetClient c = server.available();` is a temporary,
- * and a Client* into it dangles as soon as loop() returns. The pool below
- * holds N concrete clients by value, so the pointers handed to the library
- * stay valid until the library says it is done with them.
- *
- * And write capacity. availableForWrite() exists on the concrete client but
- * not on `Client`, so the predicate is installed here where the concrete type
- * is still known.
+ * It solves client lifetime -- `server.available()` returns a temporary, so the
+ * pool holds N concrete clients by value and the pointers stay valid until the
+ * library is done with them -- and write capacity, since availableForWrite()
+ * exists on the concrete client but not on `Client`.
  */
 
 #ifndef UA_ARDUINO_LISTENER_H

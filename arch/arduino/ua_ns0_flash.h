@@ -14,22 +14,19 @@
 #include <open62541.h>
 
 /* Namespace zero comes from this table exactly when the library was NOT built
- * with UA_NAMESPACE_ZERO=MINIMAL -- i.e. the NONE configuration, where upstream
- * expects an external nodestore to have ns0 pre-loaded. Deriving it from the
- * library's own configuration rather than a separate switch means the two
- * cannot disagree. */
+ * with UA_NAMESPACE_ZERO=MINIMAL -- the NONE configuration, where upstream
+ * expects an external nodestore to have ns0 pre-loaded. Derived from the
+ * library's own configuration so the two cannot disagree. */
 #ifndef UA_NAMESPACE_ZERO_MINIMAL
 #  define UA_ARDUINO_NS0_FLASH 1
 #endif
 
 /* A UA_NodePointer holding a small numeric NodeId inline.
  *
- * The packing differs between 32- and 64-bit builds, so this cannot be a value
- * the generator computes on the host: it has to be an expression the TARGET
- * compiler evaluates. Mirrors UA_NodePointer_fromNodeId() in ua_nodes.c. The
- * generator refuses any target that is not immediate-encodable (namespace >=
- * 64 or identifier >= 2^24 on 32-bit), so the fallback branch there has no
- * equivalent here. */
+ * The packing differs between 32- and 64-bit builds, so this has to be an
+ * expression the TARGET compiler evaluates rather than a value the generator
+ * computes. Mirrors UA_NodePointer_fromNodeId() in ua_nodes.c; the generator
+ * refuses any target that is not immediate-encodable. */
 #if SIZE_MAX > UA_UINT32_MAX
 #  define UA_NS0_NP(ns, num) {.immediate = (((uintptr_t)(num)) << 32) | (((uintptr_t)(ns)) << 8)}
 #else
@@ -49,20 +46,12 @@ extern const size_t    ua_ns0_reftype_count;
 
 /** Writable copies for the namespace-zero nodes the server edits.
  *
- *  Measured on hardware: 13 are taken during startup, so 16 leaves headroom
- *  without paying for slots nobody uses.
+ *  13 are taken during startup under the NONE configuration, which runs
+ *  initNS0_dataSources() and binds value-source callbacks across the
+ *  ServerStatus subtree; 16 leaves headroom. Note that a MINIMAL server runs
+ *  initNS0() instead and takes far fewer, so it is the wrong thing to measure.
  *
- *  An earlier figure of 2 was wrong, and wrong in an instructive way: it came
- *  from counting getEditNode calls on a MINIMAL server, which runs initNS0().
- *  The NONE configuration runs initNS0_dataSources() instead, and that binds
- *  value-source callbacks across the ServerStatus subtree -- a different code
- *  path with an order of magnitude more writes. Measuring the wrong
- *  configuration is worse than not measuring, because it produces a number
- *  that looks earned.
- *
- *  Exhaustion is counted and readable through UA_Arduino_getNs0OverlayStats();
- *  the overlay's own complaint goes to UA_Logger, which on a board with no
- *  console goes nowhere. */
+ *  Exhaustion is counted and readable through UA_Arduino_getNs0OverlayStats(). */
 #ifndef UA_ARDUINO_NS0_OVERLAY_SLOTS
 #define UA_ARDUINO_NS0_OVERLAY_SLOTS 16
 #endif

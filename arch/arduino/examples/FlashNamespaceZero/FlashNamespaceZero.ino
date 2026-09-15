@@ -53,17 +53,14 @@ void setup() {
 
     /* CONSTRAIN THE CONFIG. This is not optional on a microcontroller.
      *
-     * "Minimal" names the namespace-zero size, not the resource limits: what
-     * you get here is 100 sessions, a 512 MB maximum message and an unbounded
-     * chunk count, because upstream's defaults are sized for a server with an
-     * MMU. Leave them and the first client's Hello asks for more than the
-     * whole arena and the handshake fails with BadOutOfMemory -- on a board
-     * with 160 KB free, which makes it look like anything but a config
-     * problem.
+     * "Minimal" names the namespace-zero size, not the resource limits: the
+     * defaults are 100 sessions, a 512 MB maximum message and an unbounded chunk
+     * count, sized for a server with an MMU. Leave them and the first client's
+     * Hello asks for more than the whole arena.
      *
      * tcpBufSize is the chunk length in BOTH directions. 8192 is the Part 6
-     * 6.7.1 floor and open62541 enforces it internally, so it is also the
-     * value: smaller does not work, larger only costs memory. */
+     * 6.7.1 floor and open62541 enforces it internally, so smaller does not work
+     * and larger only costs memory. */
     config.tcpBufSize      = 8192;
     config.tcpMaxMsgSize   = 8192;   /* refuse to assemble more than one chunk */
     config.tcpMaxChunks    = 1;      /* both default to 0, meaning UNBOUNDED  */

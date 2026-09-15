@@ -8,15 +8,14 @@
 /*
  * gen-ns0 -- emit a const, flash-resident namespace zero.
  *
- * A server's namespace zero is identical on every device and every boot, and
- * it is never modified at runtime with node management compiled out. Building
- * it into the heap at startup therefore costs 18,992 bytes of RAM on a
- * Cortex-M4 to hold about 1.2 KB of content. Emitted as const it is 13,641
- * bytes of flash and no RAM at all.
+ * Namespace zero is identical on every device and every boot and is never
+ * modified at runtime with node management compiled out, so building it into the
+ * heap at startup spends ~19 KB of RAM to hold ~1.2 KB of content. Emitted as
+ * const it costs flash and no RAM.
  *
- * The table is read off a REAL MINIMAL server after run_startup, not inferred
- * from the nodeset XML, so it is by construction what this version of
- * open62541 actually builds. Regenerate after an upstream bump.
+ * The table is read off a real MINIMAL server after run_startup, not inferred
+ * from the nodeset XML, so it is by construction what this version of open62541
+ * builds. Regenerate after an upstream bump.
  *
  * Build (from the repo root, against a host build of the library):
  *
@@ -28,8 +27,7 @@
  *   ./gen-ns0 arch/arduino/ua_ns0_flash.c
  *
  * The output is committed rather than generated at library-build time: it is
- * deterministic, it changes only when upstream does, and generating it would
- * mean every library build also doing a host build of open62541.
+ * deterministic and changes only when upstream does.
  */
 #include <open62541/server.h>
 #include <open62541/server_config_default.h>

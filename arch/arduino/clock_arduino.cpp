@@ -24,14 +24,11 @@ uint64_t g_epoch_at_micros = 0;
 
 /** Monotonic microseconds, immune to the 32-bit micros() wrap.
  *
- *  micros() wraps every ~71.6 minutes. A server that has been up for longer
- *  than that -- which is every server -- would otherwise see time jump
- *  backwards, and open62541 schedules its housekeeping off this clock: a
- *  backwards jump stops SecureChannel reaping until the wrap is undone.
+ *  micros() wraps every ~71.6 minutes, and open62541 schedules its housekeeping
+ *  off this clock, so a backwards jump stops SecureChannel reaping.
  *
- *  Not thread-safe, and does not need to be: everything here runs from the
- *  sketch's single thread. It does need to be called more often than once per
- *  wrap period, which the EventLoop's run() guarantees. */
+ *  Not thread-safe and does not need to be, but it must be called more often
+ *  than once per wrap period, which the EventLoop's run() guarantees. */
 uint64_t monotonic_micros()
 {
     static uint32_t last  = 0;

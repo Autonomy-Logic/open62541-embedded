@@ -282,16 +282,13 @@ namespace {
 /** Install ourselves as open62541's allocator.
  *
  *  UA_ENABLE_MALLOC_SINGLETON makes UA_malloc and friends function pointers
- *  rather than compile-time bindings, so they can be redirected here before
- *  the server is built.
+ *  rather than compile-time bindings, so they can be redirected before the
+ *  server is built.
  *
- *  Called from two places on purpose. The static constructor below puts it in
- *  place before setup() runs, which covers a sketch that allocates early; but
- *  static initialisation order ACROSS translation units is unspecified, so
- *  every entry point that could be the first to allocate calls it as well.
- *  Without the second path a sketch whose own static constructor reached
- *  open62541 first would allocate from the standard heap and free into the
- *  arena, or the reverse. */
+ *  Called from two places on purpose: the static constructor below covers a
+ *  sketch that allocates early, but static initialisation order across
+ *  translation units is unspecified, so every entry point that could be the
+ *  first to allocate calls it as well. */
 void ua_arduino_install_allocator_impl()
 {
     static bool done = false;

@@ -999,15 +999,12 @@ UA_ConnectionManager_new_LWIP_UDP(const UA_String eventSourceName);
  * No EventLoop is shipped: the integrator supplies one, along with the clock.
  *
  * These are declared rather than defined because ``plugins/ua_config_default.c``
- * references the POSIX-named factories unconditionally -- ``UA_ServerConfig_setMinimal``
- * reaches them on every architecture. Without declarations here, a freestanding
- * build fails on an implicit function declaration, which newer compilers treat
- * as an error rather than a warning; older ones accepted it and produced a
- * binary whose linkage happened to work.
+ * references the POSIX-named factories unconditionally. Without declarations
+ * here, a freestanding build fails on an implicit function declaration.
  *
- * Provide definitions for the ones your configuration reaches. A build that
- * uses only the server over TCP needs the EventLoop and the TCP
- * ConnectionManager; the UDP and interrupt factories may return NULL. */
+ * Provide definitions for the ones your configuration reaches. A build that uses
+ * only the server over TCP needs the EventLoop and the TCP ConnectionManager;
+ * the UDP and interrupt factories may return NULL. */
 
 UA_EXPORT UA_EventLoop *
 UA_EventLoop_new_POSIX(const UA_Logger *logger);
