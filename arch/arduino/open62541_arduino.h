@@ -101,9 +101,14 @@
  *  not a soft limit: addTimer returns BADOUTOFMEMORY, the server carries on
  *  believing the callback is scheduled, and the work silently never happens.
  *  SecureChannel housekeeping is the one that must not be dropped: without it
- *  closed channels are never reaped and the next client is refused. */
+ *  closed channels are never reaped and the next client is refused.
+ *
+ *  Measured on hardware with a client connected: 2 are ever live at once. 24
+ *  was a guess made before there was anything to measure, and every unused
+ *  slot is 44 bytes of the EventLoop's allocation. 6 keeps triple the observed
+ *  need. Raise it if a build enables features that register more. */
 #ifndef UA_ARDUINO_MAX_TIMERS
-#define UA_ARDUINO_MAX_TIMERS 24
+#define UA_ARDUINO_MAX_TIMERS 6
 #endif
 
 /** Wall-clock epoch, as a Unix timestamp, for boards with no RTC.
@@ -228,8 +233,13 @@ void UA_Arduino_setTime(int64_t unixSeconds);
  *  Bounded by the OperationLimits: a Read walks its nodes one at a time, a
  *  Browse holds the browsed node plus what it is looking at. Deliberately
  *  small, and exhaustion is counted rather than tolerated, so a pool that is
- *  too small shows up in test instead of in the field. */
-#define UA_ARDUINO_DEFAULT_NODE_POOL_SLOTS 8
+ *  too small shows up in test instead of in the field.
+ *
+ *  Measured on hardware: high-water 1. A Read walks its nodes one at a time
+ *  and releases each before taking the next, so the depth is far lower than
+ *  the operation limits suggest. 4 is the default; the caller passes the real
+ *  value. */
+#define UA_ARDUINO_DEFAULT_NODE_POOL_SLOTS 4
 
 typedef struct {
     /** Fill `out` with the node having this numeric id in namespace `ns`.
