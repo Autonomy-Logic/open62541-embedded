@@ -279,6 +279,7 @@ UA_Node* ns_newNode(UA_Nodestore* ns, UA_NodeClass nodeClass)
     // Only the inner store ever creates nodes: ours come from flash and the
     // server never asks for one of those to be built.
     FlashNodestoreImpl* m = self(ns);
+    if (m->inner == nullptr) return nullptr;
     return m->inner->newNode(m->inner, nodeClass);
 }
 
@@ -287,7 +288,7 @@ void ns_deleteNode(UA_Nodestore* ns, UA_Node* node)
     FlashNodestoreImpl* m = self(ns);
     if (from_pool(m, node))
         return;   // flash-backed: nothing was allocated, nothing to free
-    m->inner->deleteNode(m->inner, node);
+    if (m->inner != nullptr) m->inner->deleteNode(m->inner, node);
 }
 
 const UA_Node* ns_getNode(UA_Nodestore* ns, const UA_NodeId* nodeId,
@@ -299,6 +300,7 @@ const UA_Node* ns_getNode(UA_Nodestore* ns, const UA_NodeId* nodeId,
         return materialise(m, nodeId->identifier.numeric);
     if (m->ns0_flash && is_ns0(nodeId))
         return ns0_current(nodeId->identifier.numeric);
+    if (m->inner == nullptr) return nullptr;
     return m->inner->getNode(m->inner, nodeId, attributeMask, references,
                              referenceDirections);
 }
@@ -319,6 +321,7 @@ const UA_Node* ns_getNodeFromPtr(UA_Nodestore* ns, UA_NodePointer ptr,
         if (m->ns0_flash && is_ns0(&id))
             return ns0_current(id.identifier.numeric);
     }
+    if (m->inner == nullptr) return nullptr;
     return m->inner->getNodeFromPtr(m->inner, ptr, attributeMask, references,
                                     referenceDirections);
 }
@@ -351,6 +354,7 @@ UA_Node* ns_getEditNode(UA_Nodestore* ns, const UA_NodeId* nodeId,
     }
     if (m->ns0_flash && is_ns0(nodeId))
         return ns0_overlay_get(nodeId->identifier.numeric, m->logger);
+    if (m->inner == nullptr) return nullptr;
     return m->inner->getEditNode(m->inner, nodeId, attributeMask, references,
                                  referenceDirections);
 }
@@ -366,6 +370,7 @@ UA_Node* ns_getEditNodeFromPtr(UA_Nodestore* ns, UA_NodePointer ptr,
         if (is_ours(m, &id))
             return (UA_Node*)(uintptr_t)materialise(m, id.identifier.numeric);
     }
+    if (m->inner == nullptr) return nullptr;
     return m->inner->getEditNodeFromPtr(m->inner, ptr, attributeMask, references,
                                         referenceDirections);
 }
@@ -401,7 +406,7 @@ void ns_releaseNode(UA_Nodestore* ns, const UA_Node* node)
             if (node == &o.node) return;
     }
 #endif
-    m->inner->releaseNode(m->inner, node);
+    if (m->inner != nullptr) m->inner->releaseNode(m->inner, node);
 }
 
 UA_StatusCode ns_getNodeCopy(UA_Nodestore* ns, const UA_NodeId* nodeId, UA_Node** outNode)
@@ -416,6 +421,7 @@ UA_StatusCode ns_getNodeCopy(UA_Nodestore* ns, const UA_NodeId* nodeId, UA_Node*
         // whose ownership rules would be easy to get wrong later.
         return UA_STATUSCODE_BADNOTSUPPORTED;
     }
+    if (m->inner == nullptr) return UA_STATUSCODE_BADNODEIDUNKNOWN;
     return m->inner->getNodeCopy(m->inner, nodeId, outNode);
 }
 
@@ -425,9 +431,10 @@ UA_StatusCode ns_insertNode(UA_Nodestore* ns, UA_Node* node, UA_NodeId* addedNod
     if (node != nullptr && node->head.nodeId.namespaceIndex == m->ns)
     {
         // The project's namespace is compiled in, not built at runtime.
-        m->inner->deleteNode(m->inner, node);
+        if (m->inner != nullptr) m->inner->deleteNode(m->inner, node);
         return UA_STATUSCODE_BADNOTSUPPORTED;
     }
+    if (m->inner == nullptr) return UA_STATUSCODE_BADNOTSUPPORTED;
     return m->inner->insertNode(m->inner, node, addedNodeId);
 }
 
@@ -436,6 +443,7 @@ UA_StatusCode ns_replaceNode(UA_Nodestore* ns, UA_Node* node)
     FlashNodestoreImpl* m = self(ns);
     if (node != nullptr && from_pool(m, node))
         return UA_STATUSCODE_GOOD;   // nothing to write back; flash is the truth
+    if (m->inner == nullptr) return UA_STATUSCODE_BADNOTSUPPORTED;
     return m->inner->replaceNode(m->inner, node);
 }
 
@@ -444,6 +452,7 @@ UA_StatusCode ns_removeNode(UA_Nodestore* ns, const UA_NodeId* nodeId)
     FlashNodestoreImpl* m = self(ns);
     if (is_ours(m, nodeId))
         return UA_STATUSCODE_BADNOTSUPPORTED;
+    if (m->inner == nullptr) return UA_STATUSCODE_BADNOTSUPPORTED;
     return m->inner->removeNode(m->inner, nodeId);
 }
 
@@ -460,6 +469,7 @@ const UA_NodeId* ns_getReferenceTypeId(UA_Nodestore* ns, UA_Byte refTypeIndex)
         return nullptr;
     }
 #endif
+    if (m->inner == nullptr) return nullptr;
     return m->inner->getReferenceTypeId(m->inner, refTypeIndex);
 }
 
@@ -478,7 +488,7 @@ void ns_iterate(UA_Nodestore* ns, UA_NodestoreVisitor visitor, void* visitorCtx)
     else
 #endif
     {
-        m->inner->iterate(m->inner, visitor, visitorCtx);
+        if (m->inner != nullptr) m->inner->iterate(m->inner, visitor, visitorCtx);
     }
     // Enumerating our own nodes is optional: a source that cannot list them
     // simply is not walked, which costs a Browse of the whole address space
@@ -504,7 +514,11 @@ UA_Nodestore* UA_Nodestore_newFlash(const UA_Arduino_FlashNodeSource* source,
                                     uint16_t poolSlots,
                                     bool serveNamespaceZeroFromFlash)
 {
-    if (inner == nullptr || source == nullptr || source->materialise == nullptr ||
+    // `inner` may be NULL. With namespace zero served from flash and the
+    // application's own nodes served from flash, an inner store holds nothing
+    // at all -- and open62541's default ziptree costs 2,640 bytes of heap to
+    // hold it. Every delegation below is guarded so it can simply not exist.
+    if (source == nullptr || source->materialise == nullptr ||
         source->dematerialise == nullptr)
         return nullptr;
     if (poolSlots == 0)
