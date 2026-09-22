@@ -35,7 +35,7 @@ OUT="${1:-$ROOT/build-arduino/library}"
 # first's CMake cache and silently produced the wrong namespace-zero
 # configuration -- a NONE build that was actually MINIMAL, which compiles and
 # links and only misbehaves on the device.
-BUILD="${BUILD:-$ROOT/build-arduino/cmake-${UA_NS0:-MINIMAL}}"
+BUILD="${BUILD:-$ROOT/build-arduino/cmake-${UA_NS0:-NONE}}"
 
 VERSION="$(sed -n 's/^set(OPEN62541_VER_MAJOR \([0-9]*\).*/\1/p' "$ROOT/CMakeLists.txt" | head -1)"
 MINOR="$(sed -n 's/^set(OPEN62541_VER_MINOR \([0-9]*\).*/\1/p' "$ROOT/CMakeLists.txt" | head -1)"
@@ -61,8 +61,9 @@ mkdir -p "$(dirname "$BUILD")"
 #                             does not compile with them OFF.
 # UA_NS0=NONE builds the variant whose namespace zero comes from the const
 # table in arch/arduino/ua_ns0_flash.c instead of being constructed in RAM at
-# startup -- 18,992 bytes of heap traded for 13,641 of flash. MINIMAL stays the
-# default until the NONE path has more hardware behind it.
+# startup -- ~19 KB of heap traded for ~13 KB of flash. NONE is the default and
+# what ships: the baremetal runtime refuses a MINIMAL library outright, because
+# it serves ns0 from that table and a MINIMAL build ships no table.
 cmake -S "$ROOT" -B "$BUILD" \
   -DUA_ARCHITECTURE=none \
   -DUA_ENABLE_AMALGAMATION=ON \
@@ -85,7 +86,7 @@ cmake -S "$ROOT" -B "$BUILD" \
   -DUA_ENABLE_DA=OFF \
   -DUA_ENABLE_DATATYPES_ALL=ON \
   -DUA_ENABLE_TYPEDESCRIPTION=ON \
-  -DUA_NAMESPACE_ZERO="${UA_NS0:-MINIMAL}" \
+  -DUA_NAMESPACE_ZERO="${UA_NS0:-NONE}" \
   -DUA_ENABLE_MALLOC_SINGLETON=ON \
   -DCMAKE_BUILD_TYPE=MinSizeRel \
   > "$BUILD.configure.log" 2>&1 || { tail -30 "$BUILD.configure.log"; exit 1; }
