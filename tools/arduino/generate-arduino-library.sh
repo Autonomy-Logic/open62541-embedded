@@ -31,11 +31,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUT="${1:-$ROOT/build-arduino/library}"
-# The build directory is per-variant. Sharing one meant a second run reused the
-# first's CMake cache and silently produced the wrong namespace-zero
-# configuration -- a NONE build that was actually MINIMAL, which compiles and
-# links and only misbehaves on the device.
-BUILD="${BUILD:-$ROOT/build-arduino/cmake-${UA_NS0:-NONE}}"
+BUILD="${BUILD:-$ROOT/build-arduino/cmake}"
 
 VERSION="$(sed -n 's/^set(OPEN62541_VER_MAJOR \([0-9]*\).*/\1/p' "$ROOT/CMakeLists.txt" | head -1)"
 MINOR="$(sed -n 's/^set(OPEN62541_VER_MINOR \([0-9]*\).*/\1/p' "$ROOT/CMakeLists.txt" | head -1)"
@@ -59,11 +55,12 @@ mkdir -p "$(dirname "$BUILD")"
 #                             and never used.
 #   UA_ENABLE_DATATYPES_ALL / TYPEDESCRIPTION  forced ON: the upstream build
 #                             does not compile with them OFF.
-# UA_NS0=NONE builds the variant whose namespace zero comes from the const
-# table in arch/arduino/ua_ns0_flash.c instead of being constructed in RAM at
-# startup -- ~19 KB of heap traded for ~13 KB of flash. NONE is the default and
-# what ships: the baremetal runtime refuses a MINIMAL library outright, because
-# it serves ns0 from that table and a MINIMAL build ships no table.
+# Namespace zero comes from the const table in arch/arduino/ua_ns0_flash.c.
+# The nodes are static and never change, so keeping them in flash and reading
+# them in place is strictly better than reconstructing the same graph into a
+# hashmap in SRAM at every boot. That is the only shape this fork builds --
+# upstream calls this configuration "NONE" (misleadingly: ns0 is served, from
+# flash, not absent), and there is no toggle.
 cmake -S "$ROOT" -B "$BUILD" \
   -DUA_ARCHITECTURE=none \
   -DUA_ENABLE_AMALGAMATION=ON \
@@ -86,7 +83,7 @@ cmake -S "$ROOT" -B "$BUILD" \
   -DUA_ENABLE_DA=OFF \
   -DUA_ENABLE_DATATYPES_ALL=ON \
   -DUA_ENABLE_TYPEDESCRIPTION=ON \
-  -DUA_NAMESPACE_ZERO="${UA_NS0:-NONE}" \
+  -DUA_NAMESPACE_ZERO=NONE \
   -DUA_ENABLE_MALLOC_SINGLETON=ON \
   -DCMAKE_BUILD_TYPE=MinSizeRel \
   > "$BUILD.configure.log" 2>&1 || { tail -30 "$BUILD.configure.log"; exit 1; }
@@ -261,7 +258,8 @@ about 33 KB at rest, so that part is not currently a realistic target.
 ## What is compiled out
 
 Encryption, subscriptions, method calls, historizing, discovery, node
-management and PubSub. Namespace zero is `MINIMAL`.
+management and PubSub. Namespace zero is served from a const flash table
+(`arch/arduino/ua_ns0_flash.c`) rather than reconstructed in SRAM.
 
 ## Install
 
